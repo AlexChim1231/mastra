@@ -266,54 +266,51 @@ export class ObservationStep {
     // activate an already-buffered chunk (activate() doesn't wait on an in-flight buffer op in
     // the band). Without a ready chunk, defer to a later step.
     const bandDefersObservation = statusSnapshot.inAsyncObservationBand && !statusSnapshot.canActivate;
-    const cfg = om.getObservationConfig();
-    const usage = this.turn.providerUsage;
-    const counter = om.getTokenCounter();
     let providerTrigger = false;
-    if (
-      this.turn.captureProviderUsage &&
-      usage &&
-      !this.turn.providerUsageStale &&
-      typeof cfg.providerContextTokens === 'number'
-    ) {
-      const inputDb = messageList.get.input.db();
-      let added = 0;
-      for (const msg of inputDb) {
-        added += counter.countMessage(msg);
-      }
-      if (this.stepNumber > 0) {
-        // latestStepParts concatenates last-message parts with pending input/response
-        // parts for hasIncompleteToolCalls. The newest assistant's result parts appear
-        // twice; count each toolCallId once, keeping the later copy.
-        const resultPartsByCallId = new Map<string, (typeof latestStepParts)[number]>();
-        for (const part of latestStepParts) {
-          if (part?.type !== 'tool-invocation') continue;
-          const invocation = (part as { toolInvocation?: { state?: string; toolCallId?: string } }).toolInvocation;
-          if (invocation?.state !== 'result' || !invocation.toolCallId) continue;
-          resultPartsByCallId.set(invocation.toolCallId, part);
+    if (this.turn.captureProviderUsage) {
+      const cfg = om.getObservationConfig();
+      const usage = this.turn.providerUsage;
+      if (usage && !this.turn.providerUsageStale && typeof cfg.providerContextTokens === 'number') {
+        const counter = om.getTokenCounter();
+        const inputDb = messageList.get.input.db();
+        let added = 0;
+        for (const msg of inputDb) {
+          added += counter.countMessage(msg);
         }
-        const resultParts = [...resultPartsByCallId.values()];
-        if (resultParts.length > 0) {
-          added += counter.countMessage({
-            id: 'om-provider-added-since',
-            role: 'assistant',
-            type: 'text',
-            createdAt: new Date(),
-            content: { format: 2, parts: resultParts },
-          });
+        if (this.stepNumber > 0) {
+          // latestStepParts concatenates last-message parts with pending input/response
+          // parts for hasIncompleteToolCalls. The newest assistant's result parts appear
+          // twice; count each toolCallId once, keeping the later copy.
+          const resultPartsByCallId = new Map<string, (typeof latestStepParts)[number]>();
+          for (const part of latestStepParts) {
+            if (part?.type !== 'tool-invocation') continue;
+            const invocation = (part as { toolInvocation?: { state?: string; toolCallId?: string } }).toolInvocation;
+            if (invocation?.state !== 'result' || !invocation.toolCallId) continue;
+            resultPartsByCallId.set(invocation.toolCallId, part);
+          }
+          const resultParts = [...resultPartsByCallId.values()];
+          if (resultParts.length > 0) {
+            added += counter.countMessage({
+              id: 'om-provider-added-since',
+              role: 'assistant',
+              type: 'text',
+              createdAt: new Date(),
+              content: { format: 2, parts: resultParts },
+            });
+          }
         }
+        const unobservedLocalMessages = om.getUnobservedMessages(
+          getObservableMessages(messageList),
+          statusSnapshot.record,
+        );
+        let unobservedLocal = 0;
+        for (const msg of unobservedLocalMessages) {
+          unobservedLocal += counter.countMessage(msg);
+        }
+        providerTrigger =
+          estimateNextRequestTokens(usage.inputTokens, usage.outputTokens, added) >= cfg.providerContextTokens &&
+          providerTriggerAllowed(unobservedLocal, cfg.bufferActivation, statusSnapshot.threshold);
       }
-      const unobservedLocalMessages = om.getUnobservedMessages(
-        getObservableMessages(messageList),
-        statusSnapshot.record,
-      );
-      let unobservedLocal = 0;
-      for (const msg of unobservedLocalMessages) {
-        unobservedLocal += counter.countMessage(msg);
-      }
-      providerTrigger =
-        estimateNextRequestTokens(usage.inputTokens, usage.outputTokens, added) >= cfg.providerContextTokens &&
-        providerTriggerAllowed(unobservedLocal, cfg.bufferActivation, statusSnapshot.threshold);
     }
     const willObserveNow =
       (statusSnapshot.shouldObserve || providerTrigger) && !hasIncompleteToolCalls && !bandDefersObservation;
