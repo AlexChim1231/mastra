@@ -212,6 +212,13 @@ OM performs thresholding with fast local token estimation. Text uses `tokenx`, a
             defaultValue: '30000',
           },
           {
+            name: 'providerContextTokens',
+            type: 'number',
+            description:
+              'Opt-in occupancy cap. Omit it to keep current behaviour. Use it when real provider context exceeds the local estimate (attachments, images, files, large tool results, provider-side system/tool overhead). Occupancy is last-step inputTokens plus outputTokens plus a local estimate of messages added since. Either this check or `messageTokens` can trigger observation. Missing usage falls back to the local messageTokens check. Occupancy triggers only when unobserved local tokens are above the retention floor (and above 0 when the floor is 0). Choose the model context window minus a reserve for the next response and tool output, and above fixed system/tool overhead. For a 128k window, use `100_000`. OM stamps last-step usage on the last assistant message at `content.metadata.mastra.lastModelUsage` (`lastModelUsage`) so the next turn can read it, with no storage schema change. Do not add `cachedInputTokens` on top of `inputTokens`.',
+            isOptional: true,
+          },
+          {
             name: 'maxTokensPerBatch',
             type: 'number',
             description:
