@@ -95,6 +95,7 @@ describe('MastraMemory config serialization', () => {
         providerOptions: undefined,
         maxTokensPerBatch: undefined,
         bufferTokens: undefined,
+        providerContextTokens: undefined,
         bufferActivation: undefined,
         blockAfter: undefined,
       },
@@ -107,6 +108,25 @@ describe('MastraMemory config serialization', () => {
       },
       shareTokenBudget: undefined,
     });
+  });
+
+  it('round-trips observation.providerContextTokens through getConfig()', () => {
+    const memory = new MockMemory({
+      storage: new InMemoryStore(),
+      options: {
+        observationalMemory: {
+          observation: {
+            providerContextTokens: 128000,
+          },
+        },
+      },
+    });
+
+    const omConfig = memory.getConfig().observationalMemory;
+    expect(typeof omConfig).not.toBe('boolean');
+    if (typeof omConfig !== 'boolean' && omConfig) {
+      expect(omConfig.observation?.providerContextTokens).toBe(128000);
+    }
   });
 
   it('should serialize retrieval config for resource scope without changing the requested config', () => {
