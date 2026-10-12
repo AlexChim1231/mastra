@@ -533,7 +533,7 @@ export class ObservationStep {
     let pendingMessages = observableMessages;
     const activatedMessageIds: string[] = [];
     let activated = false;
-    while (status.shouldObserve && status.canActivate) {
+    while ((status.shouldObserve || providerTriggered) && status.canActivate) {
       const activation = await om.activate({
         threadId,
         resourceId,

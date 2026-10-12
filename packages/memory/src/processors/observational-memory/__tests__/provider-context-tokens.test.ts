@@ -876,5 +876,200 @@ describe('provider context tokens', () => {
 
       expect(triggerOm.observer.call).toHaveBeenCalled();
     });
+
+    function crossingToolResultPart() {
+      return {
+        type: 'tool-invocation' as const,
+        toolInvocation: {
+          state: 'result' as const,
+          toolCallId: 'call-added-since',
+          toolName: 'lookup',
+          args: {},
+          result: 'tool result body that must exceed remaining slack. '.repeat(8),
+        },
+      };
+    }
+
+    function addCrossingAssistant(
+      messageList: MessageList,
+      id: string,
+      extraParts: MastraDBMessage['content']['parts'] = [],
+    ) {
+      messageList.add(
+        {
+          id,
+          role: 'assistant',
+          type: 'text',
+          createdAt: new Date(),
+          content: {
+            format: 2,
+            parts: [
+              { type: 'text', text: 'I will look that up after the last model call. '.repeat(20) },
+              crossingToolResultPart(),
+              ...extraParts,
+            ],
+          },
+        },
+        'response',
+      );
+    }
+
+    it('does not observe when last-step usage is missing at high messageTokens', async () => {
+      const triggerOm = createProviderOnlyOm();
+      vi.spyOn(triggerOm.observer, 'call').mockResolvedValue({
+        observations: '* User discussed topic X\n* Assistant explained Y',
+        usage: { inputTokens: 100, outputTokens: 50, totalTokens: 150 },
+      });
+      const triggerProcessor = new ObservationalMemoryProcessor(triggerOm, noopMemoryProvider);
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+      messageList.add(createTestMessage('short memory one', 'user', 'mem-miss-u1'), 'memory');
+      messageList.add(createTestMessage('short memory two', 'assistant', 'mem-miss-a1'), 'memory');
+
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 0, []));
+      addCrossingAssistant(messageList, 'asst-missing-usage');
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 1, []));
+
+      expect(triggerOm.observer.call).not.toHaveBeenCalled();
+    });
+
+    it('does not observe when last-step usage is non-finite at high messageTokens', async () => {
+      const triggerOm = createProviderOnlyOm();
+      vi.spyOn(triggerOm.observer, 'call').mockResolvedValue({
+        observations: '* User discussed topic X\n* Assistant explained Y',
+        usage: { inputTokens: 100, outputTokens: 50, totalTokens: 150 },
+      });
+      const triggerProcessor = new ObservationalMemoryProcessor(triggerOm, noopMemoryProvider);
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+      messageList.add(createTestMessage('short memory one', 'user', 'mem-nan-u1'), 'memory');
+      messageList.add(createTestMessage('short memory two', 'assistant', 'mem-nan-a1'), 'memory');
+
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 0, []));
+      addCrossingAssistant(messageList, 'asst-nan-usage');
+      await triggerProcessor.processInputStep(
+        buildInputStepArgs(messageList, state, 1, [{ usage: { inputTokens: Number.NaN, outputTokens: 10 } }]),
+      );
+
+      expect(triggerOm.observer.call).not.toHaveBeenCalled();
+    });
+
+    it('does not observe when the usage snapshot is stale at high messageTokens', async () => {
+      const triggerOm = createProviderOnlyOm();
+      vi.spyOn(triggerOm.observer, 'call').mockResolvedValue({
+        observations: '* User discussed topic X\n* Assistant explained Y',
+        usage: { inputTokens: 100, outputTokens: 50, totalTokens: 150 },
+      });
+      const triggerProcessor = new ObservationalMemoryProcessor(triggerOm, noopMemoryProvider);
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+      messageList.add(createTestMessage('short memory one', 'user', 'mem-stale-u1'), 'memory');
+      messageList.add(createTestMessage('short memory two', 'assistant', 'mem-stale-a1'), 'memory');
+
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 0, []));
+      addCrossingAssistant(messageList, 'asst-stale-first');
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 1, [{ usage: lastStepUsage }]));
+      expect(triggerOm.observer.call).toHaveBeenCalledTimes(1);
+
+      const turn = state.__omTurn as { providerUsage?: unknown; providerUsageStale?: boolean };
+      expect(turn.providerUsageStale).toBe(true);
+
+      addCrossingAssistant(messageList, 'asst-stale-second');
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 2, []));
+
+      expect(triggerOm.observer.call).toHaveBeenCalledTimes(1);
+    });
+
+    it('still observes from the local messageTokens check when usage is missing', async () => {
+      const localOm = new ObservationalMemory({
+        storage,
+        scope: 'thread',
+        observation: {
+          model: createMockObserverModel(),
+          messageTokens: 1,
+          bufferTokens: false,
+          providerContextTokens: providerCap,
+        },
+        reflection: {
+          model: createMockObserverModel(),
+          observationTokens: 50000,
+        },
+      });
+      vi.spyOn(localOm.observer, 'call').mockResolvedValue({
+        observations: '* User discussed topic X\n* Assistant explained Y',
+        usage: { inputTokens: 100, outputTokens: 50, totalTokens: 150 },
+      });
+      const localProcessor = new ObservationalMemoryProcessor(localOm, noopMemoryProvider);
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+      messageList.add(createTestMessage('please summarise this. '.repeat(40), 'user', 'msg-local-missing'), 'input');
+
+      await localProcessor.processInputStep(buildInputStepArgs(messageList, state, 0, []));
+
+      expect(localOm.observer.call).toHaveBeenCalled();
+    });
+
+    it('observes once when local shouldObserve and the provider trigger are both true', async () => {
+      const bothOm = new ObservationalMemory({
+        storage,
+        scope: 'thread',
+        observation: {
+          model: createMockObserverModel(),
+          messageTokens: 200,
+          bufferTokens: false,
+          providerContextTokens: providerCap,
+        },
+        reflection: {
+          model: createMockObserverModel(),
+          observationTokens: 50000,
+        },
+      });
+      vi.spyOn(bothOm.observer, 'call').mockResolvedValue({
+        observations: '* User discussed topic X\n* Assistant explained Y',
+        usage: { inputTokens: 100, outputTokens: 50, totalTokens: 150 },
+      });
+      const bothProcessor = new ObservationalMemoryProcessor(bothOm, noopMemoryProvider);
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+      messageList.add(createTestMessage('short memory one', 'user', 'msg-both-u1'), 'memory');
+      messageList.add(createTestMessage('short memory two', 'assistant', 'msg-both-a1'), 'memory');
+
+      await bothProcessor.processInputStep(buildInputStepArgs(messageList, state, 0, []));
+      expect(bothOm.observer.call).not.toHaveBeenCalled();
+
+      addCrossingAssistant(messageList, 'asst-both-triggers');
+      await bothProcessor.processInputStep(buildInputStepArgs(messageList, state, 1, [{ usage: lastStepUsage }]));
+
+      expect(bothOm.observer.call).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not observe when an incomplete tool call is pending even if the estimate crosses the cap', async () => {
+      const triggerOm = createProviderOnlyOm();
+      vi.spyOn(triggerOm.observer, 'call').mockResolvedValue({
+        observations: '* User discussed topic X\n* Assistant explained Y',
+        usage: { inputTokens: 100, outputTokens: 50, totalTokens: 150 },
+      });
+      const triggerProcessor = new ObservationalMemoryProcessor(triggerOm, noopMemoryProvider);
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+      messageList.add(createTestMessage('short memory one', 'user', 'mem-inc-u1'), 'memory');
+      messageList.add(createTestMessage('short memory two', 'assistant', 'mem-inc-a1'), 'memory');
+
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 0, []));
+      addCrossingAssistant(messageList, 'asst-incomplete-tool', [
+        {
+          type: 'tool-invocation',
+          toolInvocation: {
+            state: 'call',
+            toolCallId: 'call-pending',
+            toolName: 'lookup',
+            args: {},
+          },
+        },
+      ]);
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 1, [{ usage: lastStepUsage }]));
+
+      expect(triggerOm.observer.call).not.toHaveBeenCalled();
+    });
   });
 });
