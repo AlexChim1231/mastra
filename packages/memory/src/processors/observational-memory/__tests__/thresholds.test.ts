@@ -9,6 +9,7 @@ import {
   resolveRetentionFloor,
   resolveActivationRatio,
   calculateProjectedMessageRemoval,
+  estimateNextRequestTokens,
 } from '../thresholds';
 
 function makeChunk(messageTokens: number): BufferedObservationChunk {
@@ -131,6 +132,20 @@ describe('thresholds', () => {
     it('rounds the result', () => {
       // 1.3 * 33333 = 43332.9
       expect(resolveBlockAfter(1.3, 33333)).toBe(43333);
+    });
+  });
+
+  describe('estimateNextRequestTokens', () => {
+    it('sums last input, last output, and added tokens', () => {
+      expect(estimateNextRequestTokens(50, 20, 10)).toBe(80);
+    });
+
+    it('sums zero occupancy to zero', () => {
+      expect(estimateNextRequestTokens(0, 0, 0)).toBe(0);
+    });
+
+    it('sums large last-step usage with a small added-since tail', () => {
+      expect(estimateNextRequestTokens(80000, 200, 5)).toBe(80205);
     });
   });
 
