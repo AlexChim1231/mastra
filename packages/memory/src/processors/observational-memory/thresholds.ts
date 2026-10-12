@@ -97,6 +97,14 @@ export function resolveRetentionFloor(bufferActivation: number, messageTokensThr
 }
 
 /**
+ * Hybrid next-request occupancy: last provider input + last provider output +
+ * local tokens added since that usage was recorded. Does not add conversation overhead.
+ */
+export function estimateNextRequestTokens(lastInput: number, lastOutput: number, addedTokens: number): number {
+  return lastInput + lastOutput + addedTokens;
+}
+
+/**
  * Convert bufferActivation to the equivalent ratio (0-1) for the storage layer.
  * When bufferActivation >= 1000, it's an absolute retention target, so we compute
  * the equivalent ratio: 1 - (bufferActivation / threshold).
