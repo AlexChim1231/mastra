@@ -10,6 +10,7 @@ import {
   resolveActivationRatio,
   calculateProjectedMessageRemoval,
   estimateNextRequestTokens,
+  providerTriggerAllowed,
 } from '../thresholds';
 
 function makeChunk(messageTokens: number): BufferedObservationChunk {
@@ -146,6 +147,29 @@ describe('thresholds', () => {
 
     it('sums large last-step usage with a small added-since tail', () => {
       expect(estimateNextRequestTokens(80000, 200, 5)).toBe(80205);
+    });
+  });
+
+  describe('providerTriggerAllowed', () => {
+    it('allows unobserved local tokens above the retention floor', () => {
+      expect(resolveRetentionFloor(0.7, 30000)).toBeCloseTo(9000, 0);
+      expect(providerTriggerAllowed(10001, 0.7, 30000)).toBe(true);
+    });
+
+    it('refuses unobserved local tokens equal to the retention floor', () => {
+      expect(providerTriggerAllowed(9000, 0.7, 30000)).toBe(false);
+    });
+
+    it('refuses zero unobserved local tokens at a positive floor', () => {
+      expect(providerTriggerAllowed(0, 0.7, 30000)).toBe(false);
+    });
+
+    it('refuses zero unobserved local tokens when async buffering is off', () => {
+      expect(providerTriggerAllowed(0, undefined, 30000)).toBe(false);
+    });
+
+    it('allows a single unobserved local token when the floor is zero', () => {
+      expect(providerTriggerAllowed(1, undefined, 30000)).toBe(true);
     });
   });
 
