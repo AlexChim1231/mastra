@@ -509,10 +509,9 @@ export interface ObservationalMemoryObservationConfig {
 
   /**
    * Provider context window in tokens.
-   * When set, Observational Memory records last-step provider usage so later
-   * steps and later turns can read it.
-   *
-   * Unset keeps current behaviour.
+   * When set to a finite number greater than 0, Observational Memory records
+   * last-step provider usage so later steps and later turns can read it.
+   * Omitting this field keeps current behaviour.
    */
   providerContextTokens?: number;
 
