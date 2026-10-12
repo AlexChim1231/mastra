@@ -147,6 +147,29 @@ function openLoopStepBoundary(messageList: MessageList) {
   expect(messageList.openStepBoundary().appended).toBe(true);
 }
 
+function countSyntheticParts(om: ObservationalMemory, parts: MastraDBMessage['content']['parts']) {
+  return om.getTokenCounter().countMessage({
+    id: 'om-provider-added-since',
+    role: 'assistant',
+    type: 'text',
+    createdAt: new Date(),
+    content: { format: 2, parts },
+  });
+}
+
+function crossingToolResultPart() {
+  return {
+    type: 'tool-invocation' as const,
+    toolInvocation: {
+      state: 'result' as const,
+      toolCallId: 'call-added-since',
+      toolName: 'lookup',
+      args: {},
+      result: 'tool result body that must exceed remaining slack. '.repeat(8),
+    },
+  };
+}
+
 describe('provider context tokens', () => {
   let storage: InMemoryMemory;
   let om: ObservationalMemory;
@@ -883,16 +906,6 @@ describe('provider context tokens', () => {
       expect(triggerOm.observer.call).toHaveBeenCalled();
     });
 
-    function countSyntheticParts(om: ObservationalMemory, parts: MastraDBMessage['content']['parts']) {
-      return om.getTokenCounter().countMessage({
-        id: 'om-provider-added-since',
-        role: 'assistant',
-        type: 'text',
-        createdAt: new Date(),
-        content: { format: 2, parts },
-      });
-    }
-
     it('does not observe when one tool-result copy stays under the cap but two copies would cross it', async () => {
       const triggerOm = createProviderOnlyOm();
       vi.spyOn(triggerOm.observer, 'call').mockResolvedValue({
@@ -988,19 +1001,6 @@ describe('provider context tokens', () => {
 
       expect(triggerOm.observer.call).not.toHaveBeenCalled();
     });
-
-    function crossingToolResultPart() {
-      return {
-        type: 'tool-invocation' as const,
-        toolInvocation: {
-          state: 'result' as const,
-          toolCallId: 'call-added-since',
-          toolName: 'lookup',
-          args: {},
-          result: 'tool result body that must exceed remaining slack. '.repeat(8),
-        },
-      };
-    }
 
     function addCrossingAssistant(
       messageList: MessageList,
@@ -1230,16 +1230,6 @@ describe('provider context tokens', () => {
       });
     }
 
-    function countSyntheticParts(target: ObservationalMemory, parts: MastraDBMessage['content']['parts']) {
-      return target.getTokenCounter().countMessage({
-        id: 'om-provider-added-since',
-        role: 'assistant',
-        type: 'text',
-        createdAt: new Date(),
-        content: { format: 2, parts },
-      });
-    }
-
     function sumCountMessage(target: ObservationalMemory, messages: MastraDBMessage[]) {
       return messages.reduce((sum, message) => sum + target.getTokenCounter().countMessage(message), 0);
     }
@@ -1284,19 +1274,6 @@ describe('provider context tokens', () => {
             { type: 'image', image: 'https://example.com/x.jpg' },
             { type: 'file', mimeType: 'application/pdf', data: 'https://example.com/a.pdf' },
           ],
-        },
-      };
-    }
-
-    function crossingToolResultPart() {
-      return {
-        type: 'tool-invocation' as const,
-        toolInvocation: {
-          state: 'result' as const,
-          toolCallId: 'call-added-since',
-          toolName: 'lookup',
-          args: {},
-          result: 'tool result body that must exceed remaining slack. '.repeat(8),
         },
       };
     }
@@ -1523,7 +1500,7 @@ describe('provider context tokens', () => {
       expect(triggerOm.observer.call).not.toHaveBeenCalled();
     });
 
-    it('does not observe a second time when the same step usage is replayed after a provider observe', async () => {
+    it('does not observe a second time when the unobserved window is empty after a provider observe', async () => {
       const triggerOm = createOccupancyOm({ providerContextTokens: providerCap });
       mockObserverCall(triggerOm);
       const triggerProcessor = new ObservationalMemoryProcessor(triggerOm, noopMemoryProvider);
