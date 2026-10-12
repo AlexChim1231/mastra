@@ -1255,6 +1255,23 @@ describe('provider context tokens', () => {
       };
     }
 
+    function createAttachmentUnderweighMessage(): MastraDBMessage {
+      return {
+        id: 'qa02-attachments',
+        role: 'user',
+        type: 'text',
+        createdAt: new Date(),
+        content: {
+          format: 2,
+          parts: [
+            { type: 'text', text: 'please inspect these' },
+            { type: 'image', image: 'https://example.com/x.jpg' },
+            { type: 'file', mimeType: 'application/pdf', data: 'https://example.com/a.pdf' },
+          ],
+        },
+      };
+    }
+
     function crossingToolResultPart() {
       return {
         type: 'tool-invocation' as const,
@@ -1626,6 +1643,50 @@ describe('provider context tokens', () => {
 
       expect(multiSpy).not.toHaveBeenCalled();
       expect(triggerOm.observer.call).not.toHaveBeenCalled();
+    });
+
+    it('does not observe an attachment under-weigh fixture without providerContextTokens', async () => {
+      const attachment = createAttachmentUnderweighMessage();
+      const probeOm = createOccupancyOm();
+      const localSum = probeOm.getTokenCounter().countMessage(attachment);
+      expect(localSum).toBeGreaterThan(0);
+      const unsetOm = createOccupancyOm({
+        messageTokens: localSum + 1000,
+        bufferTokens: false,
+      });
+      mockObserverCall(unsetOm);
+      const unsetProcessor = new ObservationalMemoryProcessor(unsetOm, noopMemoryProvider);
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+      messageList.add(attachment, 'input');
+
+      await unsetProcessor.processInputStep(buildInputStepArgs(messageList, state, 0, []));
+      await unsetProcessor.processInputStep(buildInputStepArgs(messageList, state, 1, [{ usage: overCapUsage }]));
+
+      expect(unsetOm.observer.call).not.toHaveBeenCalled();
+    });
+
+    it('observes the same attachment fixture with providerContextTokens and large per-step usage', async () => {
+      const attachment = createAttachmentUnderweighMessage();
+      const probeOm = createOccupancyOm({ providerContextTokens: providerCap });
+      const localSum = probeOm.getTokenCounter().countMessage(attachment);
+      expect(localSum).toBeGreaterThan(0);
+      const triggerOm = createOccupancyOm({
+        messageTokens: localSum + 1000,
+        bufferTokens: false,
+        providerContextTokens: providerCap,
+      });
+      mockObserverCall(triggerOm);
+      const triggerProcessor = new ObservationalMemoryProcessor(triggerOm, noopMemoryProvider);
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+      messageList.add(attachment, 'input');
+
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 0, []));
+      expect(triggerOm.observer.call).not.toHaveBeenCalled();
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 1, [{ usage: overCapUsage }]));
+
+      expect(triggerOm.observer.call).toHaveBeenCalled();
     });
   });
 });
