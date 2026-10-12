@@ -98,6 +98,8 @@ export class ObservationStep {
       this.turn.setRecord(activation.record);
       if (activation.activated) {
         activated = true;
+        this.turn.providerUsage = undefined;
+        this.turn.providerUsageStale = true;
         if (activation.activatedMessageIds?.length) {
           messageList.removeByIds(activation.activatedMessageIds);
         }
@@ -335,6 +337,8 @@ export class ObservationStep {
         if (obsResult.succeeded) {
           observed = true;
           didThresholdCleanup = true;
+          this.turn.providerUsage = undefined;
+          this.turn.providerUsageStale = true;
 
           // Cleanup after observation. At step 0 the just-observed messages include the
           // fresh prompt the model is about to answer — preserve the in-flight messages
@@ -508,6 +512,8 @@ export class ObservationStep {
       }
 
       activated = true;
+      this.turn.providerUsage = undefined;
+      this.turn.providerUsageStale = true;
       const ids = new Set(activation.activatedMessageIds ?? []);
       activatedMessageIds.push(...ids);
       pendingMessages = pendingMessages.filter(msg => !ids.has(msg.id));

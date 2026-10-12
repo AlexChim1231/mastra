@@ -619,18 +619,6 @@ describe('provider context tokens', () => {
       const turn = state.__omTurn as { providerUsage?: unknown; providerUsageStale?: boolean };
       expect(turn.providerUsage).toBeUndefined();
       expect(turn.providerUsageStale).toBe(true);
-
-      messageList.add(createTestMessage('later actor reply', 'assistant', 'msg-asst-later'), 'response');
-      expect(observeProcessor.processOutputStep).toEqual(expect.any(Function));
-      await observeProcessor.processOutputStep!(
-        buildOutputStepArgs(messageList, state, { inputTokens: 11, outputTokens: 7 }) as any,
-      );
-      await observeProcessor.processInputStep(
-        buildInputStepArgs(messageList, state, 1, [{ usage: { inputTokens: 11, outputTokens: 7 } }]),
-      );
-
-      expect(turn.providerUsage).toEqual({ inputTokens: 11, outputTokens: 7 });
-      expect(turn.providerUsageStale).toBe(false);
     });
 
     it('clears providerUsage and marks stale after step-0 activation', async () => {
@@ -655,6 +643,18 @@ describe('provider context tokens', () => {
       const turn = state.__omTurn as { providerUsage?: unknown; providerUsageStale?: boolean };
       expect(turn.providerUsage).toBeUndefined();
       expect(turn.providerUsageStale).toBe(true);
+
+      messageList.add(createTestMessage('later actor reply', 'assistant', 'msg-asst-later'), 'response');
+      expect(activateProcessor.processOutputStep).toEqual(expect.any(Function));
+      await activateProcessor.processOutputStep!(
+        buildOutputStepArgs(messageList, state, { inputTokens: 11, outputTokens: 7 }) as any,
+      );
+      await activateProcessor.processInputStep(
+        buildInputStepArgs(messageList, state, 1, [{ usage: { inputTokens: 11, outputTokens: 7 } }]),
+      );
+
+      expect(turn.providerUsage).toEqual({ inputTokens: 11, outputTokens: 7 });
+      expect(turn.providerUsageStale).toBe(false);
     });
   });
 });
