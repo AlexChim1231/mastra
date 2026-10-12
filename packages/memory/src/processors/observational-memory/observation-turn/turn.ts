@@ -94,6 +94,12 @@ export class ObservationTurn {
    */
   captureProviderUsage = false;
 
+  /**
+   * Input message ids present when step 0 prepared. Mid-loop added-since skips these
+   * leftover prompts because they are already inside last-step inputTokens.
+   */
+  step0InputIds?: Set<string>;
+
   /** Clear the snapshot after observe/activate. No-op when capture is unset. */
   markProviderUsageStale(): void {
     if (!this.captureProviderUsage) return;

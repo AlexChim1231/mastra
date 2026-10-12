@@ -268,13 +268,18 @@ export class ObservationStep {
     const bandDefersObservation = statusSnapshot.inAsyncObservationBand && !statusSnapshot.canActivate;
     let providerTrigger = false;
     if (this.turn.captureProviderUsage) {
+      if (this.stepNumber === 0) {
+        this.turn.step0InputIds = new Set(messageList.get.input.db().map(msg => msg.id));
+      }
       const cfg = om.getObservationConfig();
       const usage = this.turn.providerUsage;
       if (usage && !this.turn.providerUsageStale && typeof cfg.providerContextTokens === 'number') {
         const counter = om.getTokenCounter();
         const inputDb = messageList.get.input.db();
+        const step0InputIds = this.turn.step0InputIds;
         let added = 0;
         for (const msg of inputDb) {
+          if (this.stepNumber > 0 && step0InputIds?.has(msg.id)) continue;
           added += counter.countMessage(msg);
         }
         if (this.stepNumber > 0) {
