@@ -4,6 +4,9 @@
  * Focused CFG/USE coverage. Do not grow observational-memory.test.ts.
  */
 
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { MockLanguageModelV2, convertArrayToReadableStream } from '@internal/ai-sdk-v5/test';
 import { Agent, MessageList } from '@mastra/core/agent';
 import type { MastraDBMessage, MastraMessageContentV2 } from '@mastra/core/agent';
@@ -13,11 +16,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { Memory } from '../../../index';
 import { BufferingCoordinator } from '../buffering-coordinator';
+import { OBSERVATIONAL_MEMORY_DEFAULTS } from '../constants';
 import { ObservationalMemory } from '../observational-memory';
 import { ObservationalMemoryProcessor } from '../processor';
 import type { MemoryContextProvider } from '../processor';
 import { normalizeProviderUsage, readLastModelUsage } from '../provider-usage';
-import type { ObservationConfig } from '../types';
 
 const noopMemoryProvider: MemoryContextProvider = {
   getContext: async () => ({
@@ -145,7 +148,7 @@ describe('provider context tokens', () => {
         messageTokens: 500,
         bufferTokens: false,
         providerContextTokens: 128000,
-      } as ObservationConfig,
+      },
       reflection: {
         model: createMockObserverModel(),
         observationTokens: 50000,
@@ -310,7 +313,7 @@ describe('provider context tokens', () => {
             messageTokens: 100_000,
             bufferTokens: false,
             providerContextTokens: 128000,
-          } as ObservationConfig,
+          },
           reflection: {
             model: observer as any,
             observationTokens: 100_000,
@@ -344,6 +347,51 @@ describe('provider context tokens', () => {
     expect(readLastModelUsage(lastAssistant) ?? lastModelUsage(lastAssistant)).toEqual({
       inputTokens: 50,
       outputTokens: 20,
+    });
+  });
+
+  describe('providerContextTokens config', () => {
+    function createOm(providerContextTokens?: number) {
+      return new ObservationalMemory({
+        storage,
+        scope: 'thread',
+        observation: {
+          model: createMockObserverModel(),
+          messageTokens: 500,
+          bufferTokens: false,
+          ...(providerContextTokens !== undefined ? { providerContextTokens } : {}),
+        },
+        reflection: {
+          model: createMockObserverModel(),
+          observationTokens: 50000,
+        },
+      });
+    }
+
+    it.each([0, Number.NaN, Number.POSITIVE_INFINITY, -1])('rejects invalid providerContextTokens %s', value => {
+      expect(() => createOm(value)).toThrow(/observation\.providerContextTokens must be a finite number > 0, got /);
+      expect(() => createOm(value)).toThrow(String(value));
+    });
+
+    it('accepts a non-integer finite number greater than 0', () => {
+      expect(() => createOm(1.5)).not.toThrow();
+    });
+
+    it('accepts 128000', () => {
+      expect(() => createOm(128000)).not.toThrow();
+    });
+
+    it('constructs when providerContextTokens is unset', () => {
+      expect(() => createOm()).not.toThrow();
+    });
+
+    it('does not default providerContextTokens in observation defaults', () => {
+      expect('providerContextTokens' in OBSERVATIONAL_MEMORY_DEFAULTS.observation).toBe(false);
+    });
+
+    it('copies providerContextTokens by name in _initOMEngine', () => {
+      const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../../../index.ts'), 'utf8');
+      expect(source).toMatch(/providerContextTokens:\s*omConfig\.observation\.providerContextTokens/);
     });
   });
 });

@@ -1272,6 +1272,13 @@ export class ObservationalMemory {
       }
     }
 
+    const providerContextTokens = this.observationConfig.providerContextTokens;
+    if (providerContextTokens !== undefined) {
+      if (!Number.isFinite(providerContextTokens) || providerContextTokens <= 0) {
+        throw new Error(`observation.providerContextTokens must be a finite number > 0, got ${providerContextTokens}`);
+      }
+    }
+
     // Validate observation bufferActivation: (0, 1] for ratio, or >= 1000 for absolute retention tokens
     if (this.observationConfig.bufferActivation !== undefined) {
       if (this.observationConfig.bufferActivation <= 0) {
