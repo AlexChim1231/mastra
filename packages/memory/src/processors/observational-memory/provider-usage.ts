@@ -36,3 +36,21 @@ export function readLastModelUsage(message: MastraDBMessage | undefined): Normal
     ?.lastModelUsage;
   return normalizeProviderUsage(stamp);
 }
+
+export function isProviderUsageStampStale(
+  message: Pick<MastraDBMessage, 'createdAt'>,
+  lastObservedAt?: Date | string | null,
+): boolean {
+  if (lastObservedAt == null || lastObservedAt === '') {
+    return false;
+  }
+  const cursor = new Date(lastObservedAt).getTime();
+  if (!Number.isFinite(cursor)) {
+    return false;
+  }
+  const created = new Date(message.createdAt).getTime();
+  if (!Number.isFinite(created)) {
+    return true;
+  }
+  return created <= cursor;
+}

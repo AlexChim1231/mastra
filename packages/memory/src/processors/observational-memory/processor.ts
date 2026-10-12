@@ -18,7 +18,12 @@ import { omDebug } from './debug';
 import type { ObservationTurn } from './observation-turn/index';
 import { loadMemoryContextMessages } from './observation-turn/load-memory-context';
 import type { ObservationalMemory } from './observational-memory';
-import { normalizeProviderUsage, stampLastModelUsage } from './provider-usage';
+import {
+  isProviderUsageStampStale,
+  normalizeProviderUsage,
+  readLastModelUsage,
+  stampLastModelUsage,
+} from './provider-usage';
 import { isOmReproCaptureEnabled, safeCaptureJson, writeProcessInputStepReproCapture } from './repro-capture';
 import { insertTemporalGapMarkers } from './temporal-markers';
 import type { TokenCounterModelContext } from './token-counter';
@@ -163,6 +168,9 @@ export class ObservationalMemoryProcessor implements Processor<'observational-me
   /** Active turn — created on first processInputStep, ended on processOutputResult. */
   private turn?: ObservationTurn;
 
+  /** True when `providerContextTokens` is a finite number greater than 0. */
+  private readonly captureProviderUsage: boolean;
+
   /**
    * Assigned per instance when `providerContextTokens` is a finite number greater than 0.
    * Left undeclared on the prototype so `'processOutputStep' in processor` stays false when unset.
@@ -174,11 +182,9 @@ export class ObservationalMemoryProcessor implements Processor<'observational-me
     this.memory = memory;
     this.temporalMarkers = options?.temporalMarkers ?? false;
     const providerContextTokens = engine.getObservationConfig().providerContextTokens;
-    if (
-      typeof providerContextTokens === 'number' &&
-      Number.isFinite(providerContextTokens) &&
-      providerContextTokens > 0
-    ) {
+    this.captureProviderUsage =
+      typeof providerContextTokens === 'number' && Number.isFinite(providerContextTokens) && providerContextTokens > 0;
+    if (this.captureProviderUsage) {
       this.processOutputStep = this.stampLastModelUsageOnOutputStep.bind(this);
     }
   }
@@ -367,9 +373,21 @@ export class ObservationalMemoryProcessor implements Processor<'observational-me
       this.turn.actorModelContext = actorModelContext;
       this.turn.responseMessageId = messageId;
 
-      if (stepNumber > 0 && this.turn) {
-        this.turn.providerUsage = normalizeProviderUsage(steps.at(-1)?.usage);
-        this.turn.providerUsageStale = false;
+      if (this.captureProviderUsage && this.turn) {
+        if (stepNumber === 0) {
+          const lastAssistant = messageList.get.remembered.db().findLast(message => message.role === 'assistant');
+          const stamp = readLastModelUsage(lastAssistant);
+          if (stamp && lastAssistant && !isProviderUsageStampStale(lastAssistant, this.turn.record.lastObservedAt)) {
+            this.turn.providerUsage = stamp;
+            this.turn.providerUsageStale = false;
+          }
+        } else {
+          const usage = normalizeProviderUsage(steps.at(-1)?.usage);
+          this.turn.providerUsage = usage;
+          if (usage) {
+            this.turn.providerUsageStale = false;
+          }
+        }
       }
 
       // ── Run step preparation (activation, threshold, observation, filtering) ──
