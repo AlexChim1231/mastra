@@ -742,12 +742,6 @@ export class ObservationStep {
   }
 }
 
-/**
- * Move messages drained into the memory bucket back to `source` after a failed save. Messages that
- * have already left the memory bucket (a background tool result moves its message to `response`)
- * are left where they are. The list's current copy is re-added so changes made during the save
- * are kept.
- */
 function partsBeforeTrailingStepStart(parts: MastraDBMessage['content']['parts']): MastraDBMessage['content']['parts'] {
   let end = parts.length;
   while (end > 0 && parts[end - 1]?.type === 'step-start') {
@@ -756,6 +750,12 @@ function partsBeforeTrailingStepStart(parts: MastraDBMessage['content']['parts']
   return end === parts.length ? parts : parts.slice(0, end);
 }
 
+/**
+ * Move messages drained into the memory bucket back to `source` after a failed save. Messages that
+ * have already left the memory bucket (a background tool result moves its message to `response`)
+ * are left where they are. The list's current copy is re-added so changes made during the save
+ * are kept.
+ */
 function restoreDrainedMessages(messageList: MessageList, drained: MastraDBMessage[], source: 'input' | 'response') {
   if (drained.length === 0) return;
   const stillQueued = new Set([...messageList.get.input.db(), ...messageList.get.response.db()].map(msg => msg.id));
