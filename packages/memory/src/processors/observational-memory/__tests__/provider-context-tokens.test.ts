@@ -1177,4 +1177,455 @@ describe('provider context tokens', () => {
       expect(triggerOm.observer.call).not.toHaveBeenCalled();
     });
   });
+
+  describe('provider occupancy trigger', () => {
+    const providerCap = 40000;
+    const overCapUsage = { inputTokens: 80000, outputTokens: 200 };
+    const belowCapUsage = { inputTokens: 39980, outputTokens: 10 };
+
+    function mockObserverCall(target: ObservationalMemory) {
+      return vi.spyOn(target.observer, 'call').mockResolvedValue({
+        observations: '* User discussed topic X\n* Assistant explained Y',
+        usage: { inputTokens: 100, outputTokens: 50, totalTokens: 150 },
+      });
+    }
+
+    function mockObserverMultiThread(target: ObservationalMemory, observeThreadId: string) {
+      return vi.spyOn(target.observer, 'callMultiThread').mockResolvedValue({
+        results: new Map([[observeThreadId, { observations: '* User discussed topic X' }]]),
+        usage: { inputTokens: 100, outputTokens: 50, totalTokens: 150 },
+      });
+    }
+
+    function createOccupancyOm(observation: Record<string, unknown> = {}, scope: 'thread' | 'resource' = 'thread') {
+      return new ObservationalMemory({
+        storage,
+        scope,
+        observation: {
+          model: createMockObserverModel(),
+          messageTokens: 500000,
+          bufferTokens: false,
+          ...observation,
+        } as ConstructorParameters<typeof ObservationalMemory>[0]['observation'],
+        reflection: {
+          model: createMockObserverModel(),
+          observationTokens: 50000,
+        },
+      });
+    }
+
+    function countSyntheticParts(target: ObservationalMemory, parts: MastraDBMessage['content']['parts']) {
+      return target.getTokenCounter().countMessage({
+        id: 'om-provider-added-since',
+        role: 'assistant',
+        type: 'text',
+        createdAt: new Date(),
+        content: { format: 2, parts },
+      });
+    }
+
+    function sumCountMessage(target: ObservationalMemory, messages: MastraDBMessage[]) {
+      return messages.reduce((sum, message) => sum + target.getTokenCounter().countMessage(message), 0);
+    }
+
+    function createBulkMessages(count: number, bulkThreadId: string): MastraDBMessage[] {
+      const base = Date.now() - count * 1000;
+      return Array.from({ length: count }, (_, i) => ({
+        ...createTestMessage(
+          `Message ${i}: `.padEnd(200, 'x'),
+          i % 2 === 0 ? 'user' : 'assistant',
+          `${bulkThreadId}-msg-${i}`,
+        ),
+        threadId: bulkThreadId,
+        resourceId,
+        createdAt: new Date(base + i * 1000),
+      }));
+    }
+
+    function tinyToolResultPart() {
+      return {
+        type: 'tool-invocation' as const,
+        toolInvocation: {
+          state: 'result' as const,
+          toolCallId: 'call-tiny',
+          toolName: 'lookup',
+          args: {},
+          result: 'ok',
+        },
+      };
+    }
+
+    function crossingToolResultPart() {
+      return {
+        type: 'tool-invocation' as const,
+        toolInvocation: {
+          state: 'result' as const,
+          toolCallId: 'call-added-since',
+          toolName: 'lookup',
+          args: {},
+          result: 'tool result body that must exceed remaining slack. '.repeat(8),
+        },
+      };
+    }
+
+    it('does not observe when providerContextTokens is unset even if last-step usage is large', async () => {
+      const unsetOm = createOccupancyOm({
+        messageTokens: 500000,
+        bufferTokens: false,
+      });
+      mockObserverCall(unsetOm);
+      const unsetProcessor = new ObservationalMemoryProcessor(unsetOm, noopMemoryProvider);
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+      messageList.add(createTestMessage('short one', 'user', 'unset-cap-u1'), 'memory');
+      messageList.add(createTestMessage('short two', 'assistant', 'unset-cap-a1'), 'memory');
+
+      await unsetProcessor.processInputStep(buildInputStepArgs(messageList, state, 0, []));
+      await unsetProcessor.processInputStep(buildInputStepArgs(messageList, state, 1, [{ usage: overCapUsage }]));
+
+      expect(unsetOm.observer.call).not.toHaveBeenCalled();
+    });
+
+    it('observes at step 0 when a new input.db() message crosses the cap while stamped usage stays under it', async () => {
+      const triggerOm = createOccupancyOm({ providerContextTokens: providerCap });
+      mockObserverCall(triggerOm);
+      const olderHistory = createTestMessage(
+        'remembered history that must stay in the remembered bucket. '.repeat(40),
+        'user',
+        'hist-old-user',
+      );
+      const stamped = createStampedAssistant({
+        id: 'asst-cross-turn',
+        inputTokens: belowCapUsage.inputTokens,
+        outputTokens: belowCapUsage.outputTokens,
+      });
+      expect(belowCapUsage.inputTokens + belowCapUsage.outputTokens).toBeLessThan(providerCap);
+      const slack = providerCap - (belowCapUsage.inputTokens + belowCapUsage.outputTokens);
+      const newUser = createTestMessage(
+        'fresh user text that must exceed remaining slack. '.repeat(8),
+        'user',
+        'input-db-cross',
+      );
+      expect(triggerOm.getTokenCounter().countMessage(newUser)).toBeGreaterThan(slack);
+      expect(triggerOm.getTokenCounter().countMessage(olderHistory)).toBeGreaterThan(slack);
+
+      const triggerProcessor = new ObservationalMemoryProcessor(triggerOm, rememberedProvider([olderHistory, stamped]));
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+      messageList.add(newUser, 'input');
+
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 0, []));
+
+      expect(triggerOm.observer.call).toHaveBeenCalled();
+    });
+
+    it('does not observe when tiny added-since stays under slack even if text, history, or countMessages would cross', async () => {
+      const triggerOm = createOccupancyOm({ providerContextTokens: providerCap });
+      mockObserverCall(triggerOm);
+      const longHistory = createTestMessage(
+        'long remembered history that would exceed remaining slack. '.repeat(40),
+        'user',
+        'hist-paired-neg',
+      );
+      const triggerProcessor = new ObservationalMemoryProcessor(triggerOm, rememberedProvider([longHistory]));
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 0, []));
+      expect(triggerOm.observer.call).not.toHaveBeenCalled();
+
+      const tinyUser = createTestMessage('hi', 'user', 'tiny-input-db');
+      const resultPart = tinyToolResultPart();
+      const tinyResultTokens = countSyntheticParts(triggerOm, [resultPart]);
+      const tinyUserTokens = triggerOm.getTokenCounter().countMessage(tinyUser);
+      const added = tinyUserTokens + tinyResultTokens;
+      expect(added).toBeGreaterThan(0);
+      expect(added).toBeLessThan(24);
+
+      const slack = Math.max(added + 1, 8);
+      expect(slack).toBeLessThanOrEqual(24);
+      const usage = { inputTokens: providerCap - slack, outputTokens: 0 };
+      expect(usage.inputTokens + usage.outputTokens).toBeLessThan(providerCap);
+      expect(usage.inputTokens + usage.outputTokens + added).toBeLessThan(providerCap);
+      expect(
+        usage.inputTokens + usage.outputTokens + triggerOm.getTokenCounter().countMessages([tinyUser]),
+      ).toBeGreaterThanOrEqual(providerCap);
+
+      const longTextPart = {
+        type: 'text' as const,
+        text: 'I will look that up after the last model call. '.repeat(200),
+      };
+      expect(countSyntheticParts(triggerOm, [longTextPart])).toBeGreaterThan(slack);
+      expect(triggerOm.getTokenCounter().countMessage(longHistory)).toBeGreaterThan(slack);
+
+      messageList.add(tinyUser, 'input');
+      messageList.add(
+        {
+          id: 'asst-paired-neg',
+          role: 'assistant',
+          type: 'text',
+          createdAt: new Date(),
+          content: { format: 2, parts: [longTextPart, resultPart] },
+        },
+        'response',
+      );
+
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 1, [{ usage }]));
+
+      expect(triggerOm.observer.call).not.toHaveBeenCalled();
+    });
+
+    it('does not observe overhead-only occupancy when the unobserved window is empty at floor 0', async () => {
+      const triggerOm = createOccupancyOm({ providerContextTokens: providerCap });
+      mockObserverCall(triggerOm);
+      const triggerProcessor = new ObservationalMemoryProcessor(triggerOm, noopMemoryProvider);
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 0, []));
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 1, [{ usage: overCapUsage }]));
+
+      expect(triggerOm.observer.call).not.toHaveBeenCalled();
+    });
+
+    it('observes overhead-only occupancy when unobserved local tokens are above floor 0', async () => {
+      const triggerOm = createOccupancyOm({ providerContextTokens: providerCap });
+      mockObserverCall(triggerOm);
+      const triggerProcessor = new ObservationalMemoryProcessor(triggerOm, noopMemoryProvider);
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+      const unobserved = createTestMessage('keep one unobserved token', 'user', 'floor0-unobserved');
+      expect(triggerOm.getTokenCounter().countMessage(unobserved)).toBeGreaterThan(0);
+      messageList.add(unobserved, 'memory');
+
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 0, []));
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 1, [{ usage: overCapUsage }]));
+
+      expect(triggerOm.observer.call).toHaveBeenCalled();
+    });
+
+    it('does not observe when unobserved local tokens are at or below a positive retention floor', async () => {
+      const triggerOm = createOccupancyOm({
+        messageTokens: 30000,
+        bufferTokens: 5000,
+        bufferActivation: 0.7,
+        providerContextTokens: providerCap,
+      });
+      mockObserverCall(triggerOm);
+      const record = await triggerOm.getOrCreateRecord(threadId, resourceId);
+      vi.spyOn(triggerOm, 'buffer').mockResolvedValue({ buffered: false, record });
+      const triggerProcessor = new ObservationalMemoryProcessor(triggerOm, noopMemoryProvider);
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+      const unobserved = [createTestMessage('floor pad '.repeat(40), 'user', 'floor-pos-u1')];
+      const localTokens = sumCountMessage(triggerOm, unobserved);
+      expect(localTokens).toBeGreaterThan(0);
+      expect(localTokens).toBeLessThanOrEqual(9000);
+      for (const message of unobserved) {
+        messageList.add(message, 'memory');
+      }
+
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 0, []));
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 1, [{ usage: overCapUsage }]));
+
+      expect(triggerOm.observer.call).not.toHaveBeenCalled();
+    });
+
+    it('does not observe a second time when the same step usage is replayed after a provider observe', async () => {
+      const triggerOm = createOccupancyOm({ providerContextTokens: providerCap });
+      mockObserverCall(triggerOm);
+      const triggerProcessor = new ObservationalMemoryProcessor(triggerOm, noopMemoryProvider);
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+      messageList.add(createTestMessage('short memory one', 'user', 'stale-obs-u1'), 'memory');
+      messageList.add(createTestMessage('short memory two', 'assistant', 'stale-obs-a1'), 'memory');
+
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 0, []));
+      const slack = providerCap - (belowCapUsage.inputTokens + belowCapUsage.outputTokens);
+      const resultPart = crossingToolResultPart();
+      expect(countSyntheticParts(triggerOm, [resultPart])).toBeGreaterThan(slack);
+      messageList.add(
+        {
+          id: 'asst-stale-observe',
+          role: 'assistant',
+          type: 'text',
+          createdAt: new Date(),
+          content: {
+            format: 2,
+            parts: [{ type: 'text', text: 'I will look that up after the last model call. '.repeat(20) }, resultPart],
+          },
+        },
+        'response',
+      );
+
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 1, [{ usage: belowCapUsage }]));
+      expect(triggerOm.observer.call).toHaveBeenCalledTimes(1);
+
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 2, [{ usage: belowCapUsage }]));
+
+      expect(triggerOm.observer.call).toHaveBeenCalledTimes(1);
+    });
+
+    it('defers observe while in the async observation band without a ready chunk', async () => {
+      const triggerOm = createOccupancyOm({
+        messageTokens: 10000,
+        bufferTokens: 2000,
+        bufferActivation: 0.8,
+        blockAfter: 1.5,
+        providerContextTokens: providerCap,
+      });
+      mockObserverCall(triggerOm);
+      const record = await triggerOm.getOrCreateRecord(threadId, resourceId);
+      vi.spyOn(triggerOm, 'buffer').mockResolvedValue({ buffered: false, record });
+      const triggerProcessor = new ObservationalMemoryProcessor(triggerOm, noopMemoryProvider);
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+      const bandMessages: MastraDBMessage[] = [];
+      let i = 0;
+      while (triggerOm.getTokenCounter().countMessages(bandMessages) < 12000) {
+        bandMessages.push(
+          createTestMessage(`band pad ${i} `.repeat(80), i % 2 ? 'assistant' : 'user', `band-defer-${i}`),
+        );
+        i += 1;
+      }
+      const pending = triggerOm.getTokenCounter().countMessages(bandMessages);
+      expect(pending).toBeGreaterThanOrEqual(10000);
+      expect(pending).toBeLessThan(15000);
+      for (const message of bandMessages) {
+        messageList.add(message, 'memory');
+      }
+
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 0, []));
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 1, [{ usage: overCapUsage }]));
+
+      expect(triggerOm.observer.call).not.toHaveBeenCalled();
+    });
+
+    it('activates a ready chunk without a second sync observe on that step', async () => {
+      const triggerOm = createOccupancyOm({
+        messageTokens: 10000,
+        bufferTokens: 2000,
+        bufferActivation: 0.8,
+        blockAfter: 1.5,
+        providerContextTokens: providerCap,
+      });
+      mockObserverCall(triggerOm);
+      const t0 = Date.now() - 60_000;
+      const bandMessages: MastraDBMessage[] = [];
+      let i = 0;
+      while (triggerOm.getTokenCounter().countMessages(bandMessages) < 12000) {
+        const message = createTestMessage(`band pad ${i} `.repeat(80), i % 2 ? 'assistant' : 'user', `band-act-${i}`);
+        message.createdAt = new Date(t0 + i * 1000);
+        bandMessages.push(message);
+        i += 1;
+      }
+      const pending = triggerOm.getTokenCounter().countMessages(bandMessages);
+      expect(pending).toBeGreaterThanOrEqual(10000);
+      expect(pending).toBeLessThan(15000);
+
+      const record = await triggerOm.getOrCreateRecord(threadId, resourceId);
+      vi.spyOn(triggerOm, 'buffer').mockResolvedValue({ buffered: false, record });
+      await storage.saveMessages({ messages: bandMessages.map(message => ({ ...message, threadId, resourceId })) });
+      await storage.updateBufferedObservations({
+        id: record.id,
+        chunk: {
+          observations: '- cycle-a observation',
+          tokenCount: 20,
+          messageIds: bandMessages.map(message => message.id),
+          cycleId: 'cycle-a',
+          messageTokens: pending,
+          lastObservedAt: bandMessages.at(-1)!.createdAt,
+        },
+      });
+      const activateSpy = vi.spyOn(triggerOm, 'activate');
+      const triggerProcessor = new ObservationalMemoryProcessor(triggerOm, rememberedProvider(bandMessages));
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 0, []));
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 1, [{ usage: overCapUsage }]));
+
+      expect(activateSpy).toHaveBeenCalled();
+      expect(triggerOm.observer.call).not.toHaveBeenCalled();
+    });
+
+    it('observes from local added-since in resource scope with sibling-thread storage', async () => {
+      const siblingThreadId = 'provider-context-tokens-sibling';
+      await storage.saveThread({
+        thread: {
+          id: siblingThreadId,
+          resourceId,
+          title: 'Sibling occupancy thread',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          metadata: {},
+        },
+      });
+      await storage.saveMessages({ messages: createBulkMessages(10, siblingThreadId) });
+
+      const triggerOm = createOccupancyOm({ providerContextTokens: providerCap }, 'resource');
+      const otherContext = await triggerOm.getOtherThreadsContext(resourceId, threadId);
+      expect(otherContext).toEqual(expect.any(String));
+      mockObserverCall(triggerOm);
+      const multiSpy = mockObserverMultiThread(triggerOm, threadId);
+      const triggerProcessor = new ObservationalMemoryProcessor(triggerOm, noopMemoryProvider);
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+      messageList.add(createTestMessage('short memory one', 'user', 'res-pos-u1'), 'memory');
+      messageList.add(createTestMessage('short memory two', 'assistant', 'res-pos-a1'), 'memory');
+
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 0, []));
+      expect(multiSpy).not.toHaveBeenCalled();
+
+      const slack = providerCap - (belowCapUsage.inputTokens + belowCapUsage.outputTokens);
+      const resultPart = crossingToolResultPart();
+      expect(countSyntheticParts(triggerOm, [resultPart])).toBeGreaterThan(slack);
+      messageList.add(
+        {
+          id: 'asst-resource-pos',
+          role: 'assistant',
+          type: 'text',
+          createdAt: new Date(),
+          content: {
+            format: 2,
+            parts: [{ type: 'text', text: 'I will look that up after the last model call. '.repeat(20) }, resultPart],
+          },
+        },
+        'response',
+      );
+
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 1, [{ usage: belowCapUsage }]));
+
+      expect(multiSpy).toHaveBeenCalled();
+      expect(triggerOm.observer.call).not.toHaveBeenCalled();
+    });
+
+    it('does not observe in resource scope when only sibling-thread tokens inflate pending occupancy', async () => {
+      const siblingThreadId = 'provider-context-tokens-sibling-neg';
+      await storage.saveThread({
+        thread: {
+          id: siblingThreadId,
+          resourceId,
+          title: 'Sibling occupancy negative',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          metadata: {},
+        },
+      });
+      await storage.saveMessages({ messages: createBulkMessages(20, siblingThreadId) });
+
+      const triggerOm = createOccupancyOm({ providerContextTokens: providerCap }, 'resource');
+      mockObserverCall(triggerOm);
+      const multiSpy = mockObserverMultiThread(triggerOm, threadId);
+      const triggerProcessor = new ObservationalMemoryProcessor(triggerOm, noopMemoryProvider);
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 0, []));
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 1, [{ usage: overCapUsage }]));
+
+      expect(multiSpy).not.toHaveBeenCalled();
+      expect(triggerOm.observer.call).not.toHaveBeenCalled();
+    });
+  });
 });
