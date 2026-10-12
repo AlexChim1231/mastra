@@ -877,6 +877,111 @@ describe('provider context tokens', () => {
       expect(triggerOm.observer.call).toHaveBeenCalled();
     });
 
+    function countSyntheticParts(om: ObservationalMemory, parts: MastraDBMessage['content']['parts']) {
+      return om.getTokenCounter().countMessage({
+        id: 'om-provider-added-since',
+        role: 'assistant',
+        type: 'text',
+        createdAt: new Date(),
+        content: { format: 2, parts },
+      });
+    }
+
+    it('does not observe when one tool-result copy stays under the cap but two copies would cross it', async () => {
+      const triggerOm = createProviderOnlyOm();
+      vi.spyOn(triggerOm.observer, 'call').mockResolvedValue({
+        observations: '* User discussed topic X\n* Assistant explained Y',
+        usage: { inputTokens: 100, outputTokens: 50, totalTokens: 150 },
+      });
+      const triggerProcessor = new ObservationalMemoryProcessor(triggerOm, noopMemoryProvider);
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+      messageList.add(createTestMessage('short memory one', 'user', 'mem-dup-u1'), 'memory');
+      messageList.add(createTestMessage('short memory two', 'assistant', 'mem-dup-a1'), 'memory');
+
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 0, []));
+      expect(triggerOm.observer.call).not.toHaveBeenCalled();
+
+      const resultPart = {
+        type: 'tool-invocation' as const,
+        toolInvocation: {
+          state: 'result' as const,
+          toolCallId: 'call-once',
+          toolName: 'lookup',
+          args: {},
+          result: 'tool result body sized so one copy stays under slack. '.repeat(6),
+        },
+      };
+      const onceTokens = countSyntheticParts(triggerOm, [resultPart]);
+      const twiceTokens = countSyntheticParts(triggerOm, [resultPart, resultPart]);
+      expect(onceTokens).toBeGreaterThan(0);
+      expect(twiceTokens).toBeGreaterThan(onceTokens);
+
+      const underCapUsage = {
+        inputTokens: providerCap - onceTokens - 1,
+        outputTokens: 0,
+      };
+      expect(underCapUsage.inputTokens + underCapUsage.outputTokens + onceTokens).toBeLessThan(providerCap);
+      expect(underCapUsage.inputTokens + underCapUsage.outputTokens + twiceTokens).toBeGreaterThanOrEqual(providerCap);
+      expect(underCapUsage.inputTokens + underCapUsage.outputTokens).toBeLessThan(providerCap);
+
+      messageList.add(
+        {
+          id: 'asst-dup-result',
+          role: 'assistant',
+          type: 'text',
+          createdAt: new Date(),
+          content: {
+            format: 2,
+            parts: [{ type: 'text', text: 'I will look that up after the last model call. '.repeat(20) }, resultPart],
+          },
+        },
+        'response',
+      );
+
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 1, [{ usage: underCapUsage }]));
+
+      expect(triggerOm.observer.call).not.toHaveBeenCalled();
+    });
+
+    it('does not observe from a long assistant text part without a tool result', async () => {
+      const triggerOm = createProviderOnlyOm();
+      vi.spyOn(triggerOm.observer, 'call').mockResolvedValue({
+        observations: '* User discussed topic X\n* Assistant explained Y',
+        usage: { inputTokens: 100, outputTokens: 50, totalTokens: 150 },
+      });
+      const triggerProcessor = new ObservationalMemoryProcessor(triggerOm, noopMemoryProvider);
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+      messageList.add(createTestMessage('short memory one', 'user', 'mem-text-u1'), 'memory');
+      messageList.add(createTestMessage('short memory two', 'assistant', 'mem-text-a1'), 'memory');
+
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 0, []));
+      expect(triggerOm.observer.call).not.toHaveBeenCalled();
+
+      const slack = providerCap - (lastStepUsage.inputTokens + lastStepUsage.outputTokens);
+      const textPart = {
+        type: 'text' as const,
+        text: 'I will look that up after the last model call. '.repeat(200),
+      };
+      expect(countSyntheticParts(triggerOm, [textPart])).toBeGreaterThan(slack);
+
+      messageList.add(
+        {
+          id: 'asst-long-text-only',
+          role: 'assistant',
+          type: 'text',
+          createdAt: new Date(),
+          content: { format: 2, parts: [textPart] },
+        },
+        'response',
+      );
+
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 1, [{ usage: lastStepUsage }]));
+
+      expect(triggerOm.observer.call).not.toHaveBeenCalled();
+    });
+
     function crossingToolResultPart() {
       return {
         type: 'tool-invocation' as const,
