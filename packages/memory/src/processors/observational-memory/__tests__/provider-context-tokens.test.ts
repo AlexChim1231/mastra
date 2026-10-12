@@ -142,6 +142,11 @@ function rememberedProvider(messages: MastraDBMessage[]): MemoryContextProvider 
   };
 }
 
+/** Match the agent loop: append a trailing step-start before processInputStep. */
+function openLoopStepBoundary(messageList: MessageList) {
+  expect(messageList.openStepBoundary().appended).toBe(true);
+}
+
 describe('provider context tokens', () => {
   let storage: InMemoryMemory;
   let om: ObservationalMemory;
@@ -871,6 +876,7 @@ describe('provider context tokens', () => {
         },
         'response',
       );
+      openLoopStepBoundary(messageList);
 
       await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 1, [{ usage: lastStepUsage }]));
 
@@ -938,6 +944,7 @@ describe('provider context tokens', () => {
         },
         'response',
       );
+      openLoopStepBoundary(messageList);
 
       await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 1, [{ usage: underCapUsage }]));
 
@@ -999,6 +1006,7 @@ describe('provider context tokens', () => {
       messageList: MessageList,
       id: string,
       extraParts: MastraDBMessage['content']['parts'] = [],
+      openBoundary = true,
     ) {
       messageList.add(
         {
@@ -1017,6 +1025,9 @@ describe('provider context tokens', () => {
         },
         'response',
       );
+      if (openBoundary) {
+        openLoopStepBoundary(messageList);
+      }
     }
 
     it('does not observe when last-step usage is missing at high messageTokens', async () => {
@@ -1161,17 +1172,22 @@ describe('provider context tokens', () => {
       messageList.add(createTestMessage('short memory two', 'assistant', 'mem-inc-a1'), 'memory');
 
       await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 0, []));
-      addCrossingAssistant(messageList, 'asst-incomplete-tool', [
-        {
-          type: 'tool-invocation',
-          toolInvocation: {
-            state: 'call',
-            toolCallId: 'call-pending',
-            toolName: 'lookup',
-            args: {},
+      addCrossingAssistant(
+        messageList,
+        'asst-incomplete-tool',
+        [
+          {
+            type: 'tool-invocation',
+            toolInvocation: {
+              state: 'call',
+              toolCallId: 'call-pending',
+              toolName: 'lookup',
+              args: {},
+            },
           },
-        },
-      ]);
+        ],
+        false,
+      );
       await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 1, [{ usage: lastStepUsage }]));
 
       expect(triggerOm.observer.call).not.toHaveBeenCalled();
@@ -1386,6 +1402,7 @@ describe('provider context tokens', () => {
         },
         'response',
       );
+      openLoopStepBoundary(messageList);
 
       await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 1, [{ usage }]));
 
@@ -1474,6 +1491,7 @@ describe('provider context tokens', () => {
         },
         'response',
       );
+      openLoopStepBoundary(messageList);
 
       await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 1, [{ usage: belowCapUsage }]));
       expect(triggerOm.observer.call).toHaveBeenCalledTimes(1);
@@ -1610,6 +1628,7 @@ describe('provider context tokens', () => {
         },
         'response',
       );
+      openLoopStepBoundary(messageList);
 
       await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 1, [{ usage: belowCapUsage }]));
 
