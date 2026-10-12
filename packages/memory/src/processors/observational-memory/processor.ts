@@ -372,12 +372,19 @@ export class ObservationalMemoryProcessor implements Processor<'observational-me
       this.turn.observabilityContext = observabilityContext;
       this.turn.actorModelContext = actorModelContext;
       this.turn.responseMessageId = messageId;
+      this.turn.captureProviderUsage = this.captureProviderUsage;
 
       if (this.captureProviderUsage && this.turn) {
         if (stepNumber === 0) {
           const lastAssistant = messageList.get.remembered.db().findLast(message => message.role === 'assistant');
           const stamp = readLastModelUsage(lastAssistant);
-          if (stamp && lastAssistant && !isProviderUsageStampStale(lastAssistant, this.turn.record.lastObservedAt)) {
+          const unobserved = lastAssistant ? this.engine.getUnobservedMessages([lastAssistant], this.turn.record) : [];
+          if (
+            stamp &&
+            lastAssistant &&
+            !isProviderUsageStampStale(lastAssistant, this.turn.record.lastObservedAt) &&
+            unobserved.some(message => message.id === lastAssistant.id)
+          ) {
             this.turn.providerUsage = stamp;
             this.turn.providerUsageStale = false;
           }

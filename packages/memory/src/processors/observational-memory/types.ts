@@ -144,8 +144,9 @@ export interface ObservationConfig {
   messageTokens?: number;
 
   /**
+   * Provider context window in tokens.
    * When set to a finite number greater than 0, Observational Memory records
-   * last-step provider usage so later steps can read occupancy.
+   * last-step provider usage so later steps and later turns can read it.
    * Omitting this field keeps current behaviour.
    */
   providerContextTokens?: number;
@@ -1244,8 +1245,9 @@ export interface ResolvedObservationConfig {
   /** Optional token budget for observer context optimization (0 = full truncation, false = disabled) */
   previousObserverTokens?: number | false;
   /**
+   * Provider context window in tokens.
    * When set to a finite number greater than 0, Observational Memory records
-   * last-step provider usage so later steps can read occupancy.
+   * last-step provider usage so later steps and later turns can read it.
    * Omitting this field keeps current behaviour.
    */
   providerContextTokens?: number;

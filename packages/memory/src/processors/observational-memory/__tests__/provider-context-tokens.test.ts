@@ -266,6 +266,7 @@ describe('provider context tokens', () => {
 
     await processor.processInputStep(
       buildInputStepArgs(messageList, state, 1, [
+        { usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 } },
         { usage: { inputTokens: 50, outputTokens: 20, totalTokens: 999, cachedInputTokens: 10 } },
       ]),
     );
@@ -454,6 +455,68 @@ describe('provider context tokens', () => {
       const returned = await unsetProcessor.processInputStep(buildInputStepArgs(messageList, state, 0));
       expect(returned).toBe(messageList);
     });
+
+    it('does not mark providerUsageStale after observe when providerContextTokens is unset', async () => {
+      const observeOm = new ObservationalMemory({
+        storage,
+        scope: 'thread',
+        observation: {
+          model: createMockObserverModel(),
+          messageTokens: 1,
+          bufferTokens: false,
+        },
+        reflection: {
+          model: createMockObserverModel(),
+          observationTokens: 50000,
+        },
+      });
+      vi.spyOn(observeOm.observer, 'call').mockResolvedValue({
+        observations: '* User discussed topic X\n* Assistant explained Y',
+        usage: { inputTokens: 100, outputTokens: 50, totalTokens: 150 },
+      });
+      const observeProcessor = new ObservationalMemoryProcessor(observeOm, noopMemoryProvider);
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+      messageList.add(createTestMessage('please summarise this. '.repeat(40), 'user', 'msg-user-unset-obs'), 'input');
+
+      await observeProcessor.processInputStep(buildInputStepArgs(messageList, state, 0));
+
+      expect(observeOm.observer.call).toHaveBeenCalled();
+      const turn = state.__omTurn as { providerUsage?: unknown; providerUsageStale?: boolean };
+      expect(turn.providerUsage).toBeUndefined();
+      expect(turn.providerUsageStale).not.toBe(true);
+    });
+
+    it('does not mark providerUsageStale after step-0 activation when providerContextTokens is unset', async () => {
+      const activateOm = new ObservationalMemory({
+        storage,
+        scope: 'thread',
+        observation: {
+          model: createMockObserverModel(),
+          messageTokens: 500,
+          bufferTokens: false,
+        },
+        reflection: {
+          model: createMockObserverModel(),
+          observationTokens: 50000,
+        },
+      });
+      const origActivate = activateOm.activate.bind(activateOm);
+      vi.spyOn(activateOm, 'activate').mockImplementation(async opts => {
+        const result = await origActivate(opts);
+        return { ...result, activated: true, activatedMessageIds: result.activatedMessageIds ?? [] };
+      });
+      const activateProcessor = new ObservationalMemoryProcessor(activateOm, noopMemoryProvider);
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+
+      await activateProcessor.processInputStep(buildInputStepArgs(messageList, state, 0));
+
+      expect(activateOm.activate).toHaveBeenCalled();
+      const turn = state.__omTurn as { providerUsage?: unknown; providerUsageStale?: boolean };
+      expect(turn.providerUsage).toBeUndefined();
+      expect(turn.providerUsageStale).not.toBe(true);
+    });
   });
 
   it('does not stamp lastModelUsage when usage counts are missing', async () => {
@@ -523,6 +586,84 @@ describe('provider context tokens', () => {
       vi.spyOn(om, 'getOrCreateRecord').mockImplementation(async (tid, rid) => {
         const rec = await orig(tid, rid);
         rec.lastObservedAt = lastObservedAt;
+        return rec;
+      });
+      const step0Processor = new ObservationalMemoryProcessor(om, rememberedProvider([stamped]));
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+
+      await step0Processor.processInputStep(buildInputStepArgs(messageList, state, 0));
+
+      const turn = state.__omTurn as { providerUsage?: unknown };
+      expect(turn.providerUsage).toBeUndefined();
+    });
+
+    it('installs a stamp when createdAt is after lastObservedAt and the assistant is unobserved', async () => {
+      const createdAt = new Date('2026-01-02T00:00:00.000Z');
+      const lastObservedAt = new Date('2026-01-01T00:00:00.000Z');
+      const stamped = createStampedAssistant({
+        id: 'asst-fresh-unobserved',
+        inputTokens: 80,
+        outputTokens: 30,
+        createdAt,
+      });
+      const orig = om.getOrCreateRecord.bind(om);
+      vi.spyOn(om, 'getOrCreateRecord').mockImplementation(async (tid, rid) => {
+        const rec = await orig(tid, rid);
+        rec.lastObservedAt = lastObservedAt;
+        rec.observedMessageIds = [];
+        return rec;
+      });
+      const step0Processor = new ObservationalMemoryProcessor(om, rememberedProvider([stamped]));
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+
+      await step0Processor.processInputStep(buildInputStepArgs(messageList, state, 0));
+
+      const turn = state.__omTurn as { providerUsage?: unknown; providerUsageStale?: boolean };
+      expect(turn.providerUsage).toEqual({ inputTokens: 80, outputTokens: 30 });
+      expect(turn.providerUsageStale).toBe(false);
+    });
+
+    it('skips a stamp when createdAt is before lastObservedAt', async () => {
+      const createdAt = new Date('2025-12-31T00:00:00.000Z');
+      const lastObservedAt = new Date('2026-01-01T00:00:00.000Z');
+      const stamped = createStampedAssistant({
+        id: 'asst-before-cursor',
+        inputTokens: 80,
+        outputTokens: 30,
+        createdAt,
+      });
+      const orig = om.getOrCreateRecord.bind(om);
+      vi.spyOn(om, 'getOrCreateRecord').mockImplementation(async (tid, rid) => {
+        const rec = await orig(tid, rid);
+        rec.lastObservedAt = lastObservedAt;
+        return rec;
+      });
+      const step0Processor = new ObservationalMemoryProcessor(om, rememberedProvider([stamped]));
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+
+      await step0Processor.processInputStep(buildInputStepArgs(messageList, state, 0));
+
+      const turn = state.__omTurn as { providerUsage?: unknown };
+      expect(turn.providerUsage).toBeUndefined();
+    });
+
+    it('does not install a stamp when the assistant is already in observedMessageIds', async () => {
+      const createdAt = new Date('2026-01-02T00:00:00.000Z');
+      const lastObservedAt = new Date('2026-01-01T00:00:00.000Z');
+      const stamped = createStampedAssistant({
+        id: 'asst-already-observed',
+        inputTokens: 80,
+        outputTokens: 30,
+        createdAt,
+      });
+      const orig = om.getOrCreateRecord.bind(om);
+      vi.spyOn(om, 'getOrCreateRecord').mockImplementation(async (tid, rid) => {
+        const rec = await orig(tid, rid);
+        rec.lastObservedAt = lastObservedAt;
+        rec.observedMessageIds = [stamped.id];
         return rec;
       });
       const step0Processor = new ObservationalMemoryProcessor(om, rememberedProvider([stamped]));

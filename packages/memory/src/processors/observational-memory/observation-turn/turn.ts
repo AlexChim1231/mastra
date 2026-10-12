@@ -79,11 +79,27 @@ export class ObservationTurn {
   /** The active assistant response message ID for this step. Updated by the processor before prepare(). */
   responseMessageId?: string;
 
-  /** Last-step actor usage snapshot for this run. Set from processInputStep when stepNumber > 0. */
+  /**
+   * Last-step actor usage snapshot for this run.
+   * Step 0 copies the remembered stamp; later steps copy the last completed step usage.
+   */
   providerUsage?: NormalizedProviderUsage;
 
   /** True after observe/activate until a later model step reports valid usage. */
   providerUsageStale = false;
+
+  /**
+   * True when `providerContextTokens` is a finite number greater than 0.
+   * Copied from the processor so observe/activate can gate snapshot writes.
+   */
+  captureProviderUsage = false;
+
+  /** Clear the snapshot after observe/activate. No-op when capture is unset. */
+  markProviderUsageStale(): void {
+    if (!this.captureProviderUsage) return;
+    this.providerUsage = undefined;
+    this.providerUsageStale = true;
+  }
 
   /** Processor-provided hooks for turn/step lifecycle integration. */
   readonly hooks: ObservationTurnHooks;
