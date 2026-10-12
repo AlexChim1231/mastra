@@ -798,4 +798,83 @@ describe('provider context tokens', () => {
       expect(turn.providerUsageStale).toBe(false);
     });
   });
+
+  describe('within-run provider occupancy trigger', () => {
+    const providerCap = 40000;
+    const lastStepUsage = { inputTokens: 39980, outputTokens: 10 };
+
+    function createProviderOnlyOm() {
+      return new ObservationalMemory({
+        storage,
+        scope: 'thread',
+        observation: {
+          model: createMockObserverModel(),
+          messageTokens: 500000,
+          bufferTokens: false,
+          providerContextTokens: providerCap,
+        },
+        reflection: {
+          model: createMockObserverModel(),
+          observationTokens: 50000,
+        },
+      });
+    }
+
+    it('observes on step 1 when tool-result added-since crosses the cap while last-step usage stays under it', async () => {
+      const triggerOm = createProviderOnlyOm();
+      vi.spyOn(triggerOm.observer, 'call').mockResolvedValue({
+        observations: '* User discussed topic X\n* Assistant explained Y',
+        usage: { inputTokens: 100, outputTokens: 50, totalTokens: 150 },
+      });
+      const triggerProcessor = new ObservationalMemoryProcessor(triggerOm, noopMemoryProvider);
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+      messageList.add(createTestMessage('short memory one', 'user', 'mem-u1'), 'memory');
+      messageList.add(createTestMessage('short memory two', 'assistant', 'mem-a1'), 'memory');
+      messageList.add(createTestMessage('short memory three', 'user', 'mem-u2'), 'memory');
+
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 0, []));
+      expect(triggerOm.observer.call).not.toHaveBeenCalled();
+
+      const slack = providerCap - (lastStepUsage.inputTokens + lastStepUsage.outputTokens);
+      expect(lastStepUsage.inputTokens + lastStepUsage.outputTokens).toBeLessThan(providerCap);
+
+      const resultPart = {
+        type: 'tool-invocation' as const,
+        toolInvocation: {
+          state: 'result' as const,
+          toolCallId: 'call-added-since',
+          toolName: 'lookup',
+          args: {},
+          result: 'tool result body that must exceed remaining slack. '.repeat(8),
+        },
+      };
+      const addedSinceTokens = triggerOm.getTokenCounter().countMessage({
+        id: 'synthetic-added-since',
+        role: 'assistant',
+        type: 'text',
+        createdAt: new Date(),
+        content: { format: 2, parts: [resultPart] },
+      });
+      expect(addedSinceTokens).toBeGreaterThan(slack);
+
+      messageList.add(
+        {
+          id: 'asst-mid-loop',
+          role: 'assistant',
+          type: 'text',
+          createdAt: new Date(),
+          content: {
+            format: 2,
+            parts: [{ type: 'text', text: 'I will look that up after the last model call. '.repeat(20) }, resultPart],
+          },
+        },
+        'response',
+      );
+
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 1, [{ usage: lastStepUsage }]));
+
+      expect(triggerOm.observer.call).toHaveBeenCalled();
+    });
+  });
 });
