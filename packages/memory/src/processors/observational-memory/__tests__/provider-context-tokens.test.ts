@@ -1615,6 +1615,14 @@ describe('provider context tokens', () => {
       const pending = triggerOm.getTokenCounter().countMessages(bandMessages);
       expect(pending).toBeGreaterThanOrEqual(10000);
       expect(pending).toBeLessThan(15000);
+      const mid = Math.max(1, Math.floor(bandMessages.length / 2));
+      const chunkA = bandMessages.slice(0, mid);
+      const chunkB = bandMessages.slice(mid);
+      expect(chunkB.length).toBeGreaterThan(0);
+      const tokensA = triggerOm.getTokenCounter().countMessages(chunkA);
+      const tokensB = triggerOm.getTokenCounter().countMessages(chunkB);
+      expect(tokensB).toBeGreaterThan(0);
+      expect(tokensB).toBeLessThan(10000);
 
       const record = await triggerOm.getOrCreateRecord(threadId, resourceId);
       vi.spyOn(triggerOm, 'buffer').mockResolvedValue({ buffered: false, record });
@@ -1624,10 +1632,21 @@ describe('provider context tokens', () => {
         chunk: {
           observations: '- cycle-a observation',
           tokenCount: 20,
-          messageIds: bandMessages.map(message => message.id),
+          messageIds: chunkA.map(message => message.id),
           cycleId: 'cycle-a',
-          messageTokens: pending,
-          lastObservedAt: bandMessages.at(-1)!.createdAt,
+          messageTokens: tokensA,
+          lastObservedAt: chunkA.at(-1)!.createdAt,
+        },
+      });
+      await storage.updateBufferedObservations({
+        id: record.id,
+        chunk: {
+          observations: '- cycle-b observation',
+          tokenCount: 20,
+          messageIds: chunkB.map(message => message.id),
+          cycleId: 'cycle-b',
+          messageTokens: tokensB,
+          lastObservedAt: chunkB.at(-1)!.createdAt,
         },
       });
       const activateSpy = vi.spyOn(triggerOm, 'activate');
@@ -1638,7 +1657,7 @@ describe('provider context tokens', () => {
       await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 0, []));
       await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 1, [{ usage: overCapUsage }]));
 
-      expect(activateSpy).toHaveBeenCalled();
+      expect(activateSpy).toHaveBeenCalledTimes(1);
       expect(triggerOm.observer.call).not.toHaveBeenCalled();
     });
 
