@@ -218,4 +218,94 @@ describe('knowledge semantic index lost claims', () => {
     await fast.drain(scopeIds).catch(() => {});
     expect(indexed.get(`knowledge:node:${node.id}`)).toBe('Version two');
   });
+
+  it('does not let a lost-claim repair overwrite a newer completed update', async () => {
+    const { store, scopeIds } = await fixture();
+    const node = await store.createNode({ name: 'Version one', kind: 'project', scopeIds });
+    const indexed = new Map<string, { name: unknown; vector: number[] }>();
+    const indexes = new Set<string>();
+    const gates = new Map<
+      string,
+      { started: Promise<void>; signal: () => void; wait: Promise<void>; release: () => void }
+    >();
+    for (const text of ['Version one', 'Version two']) {
+      let signal!: () => void;
+      let release!: () => void;
+      gates.set(text, {
+        started: new Promise<void>(resolve => (signal = resolve)),
+        signal,
+        wait: new Promise<void>(resolve => (release = resolve)),
+        release: () => release(),
+      });
+    }
+    const slowEmbedder = {
+      specificationVersion: 'v2',
+      provider: 'test',
+      modelId: 'test-embedder',
+      maxEmbeddingsPerCall: 10,
+      supportsParallelCalls: true,
+      doEmbed: async ({ values }: { values: string[] }) => {
+        const gate = gates.get(values[0]!);
+        if (gate) {
+          gate.signal();
+          await gate.wait;
+        }
+        return { embeddings: values.map(value => [value.endsWith('one') ? 1 : value.endsWith('two') ? 2 : 3]) };
+      },
+    } as any;
+    const fastEmbedder = {
+      ...slowEmbedder,
+      doEmbed: async ({ values }: { values: string[] }) => ({
+        embeddings: values.map(value => [value.endsWith('one') ? 1 : value.endsWith('two') ? 2 : 3]),
+      }),
+    } as any;
+    const vector = {
+      listIndexes: async () => [...indexes],
+      createIndex: async ({ indexName }: { indexName: string }) => void indexes.add(indexName),
+      deleteVectors: async ({ ids }: { ids: string[] }) => ids.forEach(id => indexed.delete(id)),
+      upsert: async (input: { ids: string[]; vectors: number[][]; metadata: Array<Record<string, unknown>> }) =>
+        input.ids.forEach((id, index) =>
+          indexed.set(id, { name: input.metadata[index]!.name, vector: input.vectors[index]! }),
+        ),
+      query: async () => [],
+    } as any;
+    const slow = new KnowledgeSemanticIndexCoordinator({
+      knowledge: store,
+      vector,
+      embedder: slowEmbedder,
+      workerId: 'slow',
+    });
+    const expiringStore = new Proxy(store, {
+      get: (target, property) => {
+        if (property === 'claimSemanticOutbox')
+          return (input: Parameters<typeof store.claimSemanticOutbox>[0]) =>
+            target.claimSemanticOutbox({ ...input, claimTimeoutMs: 1 });
+        const value = Reflect.get(target, property);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const fast = new KnowledgeSemanticIndexCoordinator({
+      knowledge: expiringStore,
+      vector,
+      embedder: fastEmbedder,
+      workerId: 'fast',
+    });
+
+    const slowDrain = slow.drain(scopeIds);
+    await gates.get('Version one')!.started;
+    const versionTwo = await store.updateNode({ id: node.id, version: node.version, name: 'Version two' });
+    await new Promise(resolve => setTimeout(resolve, 20));
+    await fast.drain(scopeIds);
+    gates.get('Version one')!.release();
+    await gates.get('Version two')!.started;
+
+    await store.updateNode({ id: node.id, version: versionTwo.version, name: 'Version three' });
+    await fast.drain(scopeIds);
+    expect(indexed.get(`knowledge:node:${node.id}`)).toEqual({ name: 'Version three', vector: [3] });
+
+    gates.get('Version two')!.release();
+    await slowDrain;
+    expect(indexed.get(`knowledge:node:${node.id}`)).toEqual({ name: 'Version three', vector: [3] });
+    expect(await store.listSemanticOutbox({ scopeIds })).toEqual([]);
+  });
 });

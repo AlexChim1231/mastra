@@ -9,6 +9,7 @@ import type { MastraEmbeddingModel, MastraEmbeddingOptions, MastraVector } from 
 
 const DEFAULT_BATCH_SIZE = 50;
 const MAX_DRAIN_BATCHES = 100;
+const MAX_REPAIR_ATTEMPTS = 100;
 
 export class StaleKnowledgeSemanticIndexError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -34,6 +35,7 @@ interface KnowledgeSemanticDocument {
   scopeIds: KnowledgeScopeIds;
   recordId: string;
   type: KnowledgeSemanticDocumentType;
+  version: string;
 }
 
 export class KnowledgeSemanticIndexCoordinator {
@@ -131,10 +133,9 @@ export class KnowledgeSemanticIndexCoordinator {
           await this.#apply(entry);
           const completed = await this.#knowledge.completeSemanticOutbox({ ids: [entry.id], workerId: this.#workerId });
           // Our claim expired and another worker finished this entry; the write above may have
-          // overwritten its newer vector, so re-apply from current storage state to converge.
-          // Adapters published before completions were reported return nothing; treat that as held.
-          if (Array.isArray(completed) && !completed.includes(entry.id))
-            await this.#apply({ ...entry, operation: 'upsert' });
+          // overwritten its newer vector, so retry current storage state up to the repair bound.
+          // Legacy adapters that do not report completion ownership cannot trigger this repair.
+          if (Array.isArray(completed) && !completed.includes(entry.id)) await this.#repair(entry);
           processed++;
         } catch (error) {
           await this.#knowledge.releaseSemanticOutbox({
@@ -158,10 +159,34 @@ export class KnowledgeSemanticIndexCoordinator {
       await this.#deleteDocument(entry.documentId);
       return;
     }
+    await this.#applyDocument(entry.documentId, await this.#loadDocument(entry));
+  }
 
-    const document = await this.#loadDocument(entry);
+  async #repair(entry: KnowledgeSemanticOutboxEntry): Promise<void> {
+    for (let attempt = 0; attempt < MAX_REPAIR_ATTEMPTS; attempt++) {
+      const document = await this.#loadDocument(entry);
+      await this.#applyDocument(entry.documentId, document);
+      const current = await this.#loadDocument(entry);
+      if (this.#documentsEqual(current, document)) return;
+    }
+    throw new Error(`Knowledge semantic document ${entry.documentId} did not stabilize during lost-claim repair.`);
+  }
+
+  #documentsEqual(left: KnowledgeSemanticDocument | null, right: KnowledgeSemanticDocument | null): boolean {
+    if (!left || !right) return left === right;
+    return (
+      left.text === right.text &&
+      left.name === right.name &&
+      left.recordId === right.recordId &&
+      left.type === right.type &&
+      left.version === right.version &&
+      [...left.scopeIds].sort().join('\0') === [...right.scopeIds].sort().join('\0')
+    );
+  }
+
+  async #applyDocument(documentId: string, document: KnowledgeSemanticDocument | null): Promise<void> {
     if (!document) {
-      await this.#deleteDocument(entry.documentId);
+      await this.#deleteDocument(documentId);
       return;
     }
     const result = await this.#embedder.doEmbed({
@@ -169,7 +194,7 @@ export class KnowledgeSemanticIndexCoordinator {
       ...(this.#embedderOptions ?? {}),
     } as never);
     const embedding = result.embeddings[0];
-    if (!embedding?.length) throw new Error(`Embedder returned no vector for ${entry.documentId}`);
+    if (!embedding?.length) throw new Error(`Embedder returned no vector for ${documentId}`);
     const indexName = this.#indexName(embedding.length);
     const indexes = await this.#knowledgeIndexes();
     if (!indexes.includes(indexName)) {
@@ -177,12 +202,12 @@ export class KnowledgeSemanticIndexCoordinator {
     }
     for (const existingIndex of indexes) {
       if (existingIndex !== indexName) {
-        await this.#vector.deleteVectors({ indexName: existingIndex, ids: [entry.documentId] });
+        await this.#vector.deleteVectors({ indexName: existingIndex, ids: [documentId] });
       }
     }
     await this.#vector.upsert({
       indexName,
-      ids: [entry.documentId],
+      ids: [documentId],
       vectors: [embedding],
       metadata: [this.#metadata(document)],
     });
@@ -199,6 +224,7 @@ export class KnowledgeSemanticIndexCoordinator {
         scopeIds: await this.#knowledge.getNodeScopeIds(node.id),
         recordId: node.id,
         type: 'node',
+        version: String(node.version),
       };
     }
     const record = await this.#knowledge.getRecord({
@@ -214,6 +240,7 @@ export class KnowledgeSemanticIndexCoordinator {
       scopeIds: await this.#knowledge.getRecordScopeIds(record.id),
       recordId: record.id,
       type: 'record',
+      version: `${record.version}:${node.version}`,
     };
   }
 
