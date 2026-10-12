@@ -4181,6 +4181,8 @@ ${formattedMessages}
     hooks?: ObserveLifecycleHooks;
     /** Which pipeline path initiated this cycle; defaults to 'manual'. */
     trigger?: ObserveTrigger;
+    /** Internal. Set only from runThresholdObservation when the provider occupancy trigger fired. */
+    skipMessageTokensGate?: boolean;
     agent?: ProcessorContext['agent'];
     sendSignal?: ProcessorContext['sendSignal'];
     sendStateSignal?: ProcessorContext['sendStateSignal'];
@@ -4224,6 +4226,7 @@ ${formattedMessages}
             );
 
         if (
+          !opts.skipMessageTokensGate &&
           !this.meetsObservationThreshold({
             record: freshRecord,
             unobservedTokens: await this.tokenCounter.countMessagesAsync(unobservedMessages),

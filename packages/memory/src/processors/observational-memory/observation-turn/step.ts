@@ -5,7 +5,7 @@ import { omDebug } from '../debug';
 import { isOmModelExecutionError } from '../error';
 import { filterObservedMessages, getObservableMessages } from '../message-utils';
 import { getLastActivityFromMessages, getLatestStepParts } from '../observational-memory';
-import { resolveRetentionFloor } from '../thresholds';
+import { estimateNextRequestTokens, providerTriggerAllowed, resolveRetentionFloor } from '../thresholds';
 
 import { selectSafeBufferPrefix } from './safe-buffer-prefix';
 import type { ObservationTurn } from './turn';
@@ -266,7 +266,51 @@ export class ObservationStep {
     // activate an already-buffered chunk (activate() doesn't wait on an in-flight buffer op in
     // the band). Without a ready chunk, defer to a later step.
     const bandDefersObservation = statusSnapshot.inAsyncObservationBand && !statusSnapshot.canActivate;
-    const willObserveNow = statusSnapshot.shouldObserve && !hasIncompleteToolCalls && !bandDefersObservation;
+    const cfg = om.getObservationConfig();
+    const usage = this.turn.providerUsage;
+    const counter = om.getTokenCounter();
+    let providerTrigger = false;
+    if (
+      this.turn.captureProviderUsage &&
+      usage &&
+      !this.turn.providerUsageStale &&
+      typeof cfg.providerContextTokens === 'number'
+    ) {
+      const inputDb = messageList.get.input.db();
+      let added = 0;
+      for (const msg of inputDb) {
+        added += counter.countMessage(msg);
+      }
+      if (this.stepNumber > 0) {
+        const resultParts = latestStepParts.filter(
+          part =>
+            part?.type === 'tool-invocation' &&
+            (part as { toolInvocation?: { state?: string } }).toolInvocation?.state === 'result',
+        );
+        if (resultParts.length > 0) {
+          added += counter.countMessage({
+            id: 'om-provider-added-since',
+            role: 'assistant',
+            type: 'text',
+            createdAt: new Date(),
+            content: { format: 2, parts: resultParts },
+          });
+        }
+      }
+      const unobservedLocalMessages = om.getUnobservedMessages(
+        getObservableMessages(messageList),
+        statusSnapshot.record,
+      );
+      let unobservedLocal = 0;
+      for (const msg of unobservedLocalMessages) {
+        unobservedLocal += counter.countMessage(msg);
+      }
+      providerTrigger =
+        estimateNextRequestTokens(usage.inputTokens, usage.outputTokens, added) >= cfg.providerContextTokens &&
+        providerTriggerAllowed(unobservedLocal, cfg.bufferActivation, statusSnapshot.threshold);
+    }
+    const willObserveNow =
+      (statusSnapshot.shouldObserve || providerTrigger) && !hasIncompleteToolCalls && !bandDefersObservation;
     /** In-flight message ids the step-0 cleanup must never remove from live context. */
     let step0PreserveIds: string[] | undefined;
     if (this.stepNumber > 0 || willObserveNow) {
@@ -331,7 +375,7 @@ export class ObservationStep {
       // Threshold observation (skip if tool calls pending)
       if (willObserveNow) {
         const preObsGeneration = this.turn.record.generationCount;
-        const obsResult = await this.runThresholdObservation(statusSnapshot.inAsyncObservationBand);
+        const obsResult = await this.runThresholdObservation(statusSnapshot.inAsyncObservationBand, providerTrigger);
         observerExchange = obsResult.observerExchange;
         if (obsResult.succeeded) {
           observed = true;
@@ -440,7 +484,10 @@ export class ObservationStep {
    * waitForBuffering → re-check → activate buffered chunks → reflect → observe
    * (sync fallback at blockAfter when async buffering is enabled)
    */
-  private async runThresholdObservation(inAsyncObservationBand?: boolean): Promise<{
+  private async runThresholdObservation(
+    inAsyncObservationBand?: boolean,
+    providerTriggered?: boolean,
+  ): Promise<{
     succeeded: boolean;
     record: any;
     activatedMessageIds?: string[];
@@ -477,7 +524,7 @@ export class ObservationStep {
       messages: observableMessages,
     });
 
-    if (!status.shouldObserve) {
+    if (!status.shouldObserve && !providerTriggered) {
       return { succeeded: false, record: status.record, cleanupMessageIds: [] };
     }
 
@@ -589,6 +636,8 @@ export class ObservationStep {
         messages: pendingMessages,
         messageList,
         trigger: 'turn-sync',
+        // Internal: skip the local messageTokens gate for a provider-only observe.
+        skipMessageTokensGate: !!providerTriggered,
         agent: this.turn.agent,
         sendSignal: this.turn.sendSignal,
         sendStateSignal: this.turn.sendStateSignal,
