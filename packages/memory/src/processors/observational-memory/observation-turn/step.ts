@@ -278,11 +278,18 @@ export class ObservationStep {
           added += counter.countMessage(msg);
         }
         if (this.stepNumber > 0) {
-          // latestStepParts concatenates last-message parts with pending input/response
-          // parts for hasIncompleteToolCalls. The newest assistant's result parts appear
-          // twice; count each toolCallId once, keeping the later copy.
-          const resultPartsByCallId = new Map<string, (typeof latestStepParts)[number]>();
-          for (const part of latestStepParts) {
+          // The agent loop appends a trailing step-start before processInputStep. Do not
+          // reuse latestStepParts here: that slice is after the last step-start, so it
+          // would miss the previous step's tool results. hasIncompleteToolCalls stays on
+          // the unstripped latest-step window.
+          const previousStepParts = [
+            ...getLatestStepParts(partsBeforeTrailingStepStart(lastMessage?.content?.parts ?? [])),
+            ...pendingStepMessages.flatMap(msg =>
+              getLatestStepParts(partsBeforeTrailingStepStart(msg.content?.parts ?? [])),
+            ),
+          ];
+          const resultPartsByCallId = new Map<string, (typeof previousStepParts)[number]>();
+          for (const part of previousStepParts) {
             if (part?.type !== 'tool-invocation') continue;
             const invocation = (part as { toolInvocation?: { state?: string; toolCallId?: string } }).toolInvocation;
             if (invocation?.state !== 'result' || !invocation.toolCallId) continue;
@@ -732,6 +739,14 @@ export class ObservationStep {
  * are left where they are. The list's current copy is re-added so changes made during the save
  * are kept.
  */
+function partsBeforeTrailingStepStart(parts: MastraDBMessage['content']['parts']): MastraDBMessage['content']['parts'] {
+  let end = parts.length;
+  while (end > 0 && parts[end - 1]?.type === 'step-start') {
+    end -= 1;
+  }
+  return end === parts.length ? parts : parts.slice(0, end);
+}
+
 function restoreDrainedMessages(messageList: MessageList, drained: MastraDBMessage[], source: 'input' | 'response') {
   if (drained.length === 0) return;
   const stillQueued = new Set([...messageList.get.input.db(), ...messageList.get.response.db()].map(msg => msg.id));
