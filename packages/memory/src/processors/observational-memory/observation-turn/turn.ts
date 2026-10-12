@@ -9,6 +9,7 @@ import { omDebug } from '../debug';
 import { getObservableMessages } from '../message-utils';
 import type { ObservationalMemory } from '../observational-memory';
 import type { MemoryContextProvider } from '../processor';
+import type { NormalizedProviderUsage } from '../provider-usage';
 import type { ObservationModelContext } from '../types';
 
 import { loadMemoryContextMessages } from './load-memory-context';
@@ -77,6 +78,12 @@ export class ObservationTurn {
 
   /** The active assistant response message ID for this step. Updated by the processor before prepare(). */
   responseMessageId?: string;
+
+  /** Last-step actor usage snapshot for this run. Set from processInputStep when stepNumber > 0. */
+  providerUsage?: NormalizedProviderUsage;
+
+  /** True after observe/activate until a later model step reports valid usage. */
+  providerUsageStale = false;
 
   /** Processor-provided hooks for turn/step lifecycle integration. */
   readonly hooks: ObservationTurnHooks;

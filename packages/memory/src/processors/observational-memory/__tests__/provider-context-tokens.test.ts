@@ -268,11 +268,10 @@ describe('provider context tokens', () => {
     messageList.add(createTestMessage('Hi', 'assistant', 'msg-assistant'), 'response');
 
     expect(processor.processOutputStep).toEqual(expect.any(Function));
-    await expect(
-      processor.processOutputStep!(
-        buildOutputStepArgs(messageList, state, { inputTokens: Number.NaN, outputTokens: 20 }) as any,
-      ),
-    ).resolves.toBe(messageList);
+    const returned = await processor.processOutputStep!(
+      buildOutputStepArgs(messageList, state, { inputTokens: Number.NaN, outputTokens: 20 }) as any,
+    );
+    expect(returned).toBe(messageList);
 
     const lastAssistant = messageList.get.response.db().findLast(m => m.role === 'assistant');
     expect(lastModelUsage(lastAssistant)).toBeUndefined();

@@ -7,6 +7,7 @@ import type {
   Processor,
   ProcessInputStepArgs,
   ProcessOutputResultArgs,
+  ProcessOutputStepArgs,
   ProcessorSpanPhase,
 } from '@mastra/core/processors';
 import type { ObservationalMemoryRecord } from '@mastra/core/storage';
@@ -17,6 +18,7 @@ import { omDebug } from './debug';
 import type { ObservationTurn } from './observation-turn/index';
 import { loadMemoryContextMessages } from './observation-turn/load-memory-context';
 import type { ObservationalMemory } from './observational-memory';
+import { normalizeProviderUsage, stampLastModelUsage } from './provider-usage';
 import { isOmReproCaptureEnabled, safeCaptureJson, writeProcessInputStepReproCapture } from './repro-capture';
 import { insertTemporalGapMarkers } from './temporal-markers';
 import type { TokenCounterModelContext } from './token-counter';
@@ -161,10 +163,46 @@ export class ObservationalMemoryProcessor implements Processor<'observational-me
   /** Active turn — created on first processInputStep, ended on processOutputResult. */
   private turn?: ObservationTurn;
 
+  /**
+   * Assigned per instance when `providerContextTokens` is a finite number greater than 0.
+   * Left undeclared on the prototype so `'processOutputStep' in processor` stays false when unset.
+   */
+  declare processOutputStep?: Processor<'observational-memory'>['processOutputStep'];
+
   constructor(engine: ObservationalMemory, memory: MemoryContextProvider, options?: { temporalMarkers?: boolean }) {
     this.engine = engine;
     this.memory = memory;
     this.temporalMarkers = options?.temporalMarkers ?? false;
+    const providerContextTokens = engine.getObservationConfig().providerContextTokens;
+    if (
+      typeof providerContextTokens === 'number' &&
+      Number.isFinite(providerContextTokens) &&
+      providerContextTokens > 0
+    ) {
+      this.processOutputStep = this.stampLastModelUsageOnOutputStep.bind(this);
+    }
+  }
+
+  private stampLastModelUsageOnOutputStep(args: ProcessOutputStepArgs): MessageList {
+    const { messageList, requestContext, usage } = args;
+    const state = args.state ?? ({} as Record<string, unknown>);
+
+    const context = this.engine.getThreadContext(requestContext, messageList);
+    if (!context) return messageList;
+    if (state[GATEWAY_STATE_KEY]) return messageList;
+
+    const memoryContext = parseMemoryRequestContext(requestContext);
+    if (memoryContext?.memoryConfig?.readOnly) return messageList;
+
+    const normalized = normalizeProviderUsage(usage);
+    if (normalized) {
+      const lastAssistant = messageList.get.response.db().findLast(message => message.role === 'assistant');
+      if (lastAssistant) {
+        stampLastModelUsage(lastAssistant, normalized);
+      }
+    }
+
+    return messageList;
   }
 
   // ─── Processor lifecycle hooks ──────────────────────────────────────────
@@ -174,6 +212,7 @@ export class ObservationalMemoryProcessor implements Processor<'observational-me
       messageList,
       requestContext,
       stepNumber,
+      steps,
       state: _state,
       writer,
       model,
@@ -327,6 +366,11 @@ export class ObservationalMemoryProcessor implements Processor<'observational-me
       this.turn.observabilityContext = observabilityContext;
       this.turn.actorModelContext = actorModelContext;
       this.turn.responseMessageId = messageId;
+
+      if (stepNumber > 0 && this.turn) {
+        this.turn.providerUsage = normalizeProviderUsage(steps.at(-1)?.usage);
+        this.turn.providerUsageStale = false;
+      }
 
       // ── Run step preparation (activation, threshold, observation, filtering) ──
       {

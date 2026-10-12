@@ -5,12 +5,34 @@ export type NormalizedProviderUsage = {
   outputTokens: number;
 };
 
-export function normalizeProviderUsage(_usage: unknown): NormalizedProviderUsage | undefined {
-  return { inputTokens: -1, outputTokens: -1 };
+export function normalizeProviderUsage(usage: unknown): NormalizedProviderUsage | undefined {
+  if (!usage || typeof usage !== 'object') {
+    return undefined;
+  }
+
+  const raw = usage as Record<string, unknown>;
+  const inputTokens = raw.inputTokens ?? raw.promptTokens;
+  const outputTokens = raw.outputTokens ?? raw.completionTokens;
+  if (!Number.isFinite(inputTokens) || !Number.isFinite(outputTokens)) {
+    return undefined;
+  }
+
+  return { inputTokens: inputTokens as number, outputTokens: outputTokens as number };
 }
 
-export function stampLastModelUsage(_message: MastraDBMessage, _usage: NormalizedProviderUsage): void {}
+export function stampLastModelUsage(message: MastraDBMessage, usage: NormalizedProviderUsage): void {
+  if (!message.content.metadata) {
+    message.content.metadata = {};
+  }
+  const metadata = message.content.metadata as { mastra?: { lastModelUsage?: NormalizedProviderUsage } };
+  if (!metadata.mastra) {
+    metadata.mastra = {};
+  }
+  metadata.mastra.lastModelUsage = { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens };
+}
 
-export function readLastModelUsage(_message: MastraDBMessage | undefined): NormalizedProviderUsage | undefined {
-  return undefined;
+export function readLastModelUsage(message: MastraDBMessage | undefined): NormalizedProviderUsage | undefined {
+  const stamp = (message?.content?.metadata as { mastra?: { lastModelUsage?: unknown } } | undefined)?.mastra
+    ?.lastModelUsage;
+  return normalizeProviderUsage(stamp);
 }

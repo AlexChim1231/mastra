@@ -771,6 +771,7 @@ export class ObservationalMemory {
         continuationHints: config.observation?.continuationHints,
       }),
     };
+    this.observationConfig.providerContextTokens = config.observation?.providerContextTokens;
 
     // Resolve reflection config with defaults
     this.reflectionConfig = {
