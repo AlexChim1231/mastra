@@ -282,11 +282,17 @@ export class ObservationStep {
         added += counter.countMessage(msg);
       }
       if (this.stepNumber > 0) {
-        const resultParts = latestStepParts.filter(
-          part =>
-            part?.type === 'tool-invocation' &&
-            (part as { toolInvocation?: { state?: string } }).toolInvocation?.state === 'result',
-        );
+        // latestStepParts concatenates last-message parts with pending input/response
+        // parts for hasIncompleteToolCalls. The newest assistant's result parts appear
+        // twice; count each toolCallId once, keeping the later copy.
+        const resultPartsByCallId = new Map<string, (typeof latestStepParts)[number]>();
+        for (const part of latestStepParts) {
+          if (part?.type !== 'tool-invocation') continue;
+          const invocation = (part as { toolInvocation?: { state?: string; toolCallId?: string } }).toolInvocation;
+          if (invocation?.state !== 'result' || !invocation.toolCallId) continue;
+          resultPartsByCallId.set(invocation.toolCallId, part);
+        }
+        const resultParts = [...resultPartsByCallId.values()];
         if (resultParts.length > 0) {
           added += counter.countMessage({
             id: 'om-provider-added-since',
