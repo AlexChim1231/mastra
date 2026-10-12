@@ -124,9 +124,10 @@ describe('MastraMemory config serialization', () => {
 
     const omConfig = memory.getConfig().observationalMemory;
     expect(typeof omConfig).not.toBe('boolean');
-    if (typeof omConfig !== 'boolean' && omConfig) {
-      expect(omConfig.observation?.providerContextTokens).toBe(128000);
+    if (typeof omConfig === 'boolean' || !omConfig) {
+      throw new Error('expected observational memory config object');
     }
+    expect(omConfig.observation?.providerContextTokens).toBe(128000);
   });
 
   it('should serialize retrieval config for resource scope without changing the requested config', () => {
