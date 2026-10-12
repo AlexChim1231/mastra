@@ -20,7 +20,7 @@ import { OBSERVATIONAL_MEMORY_DEFAULTS } from '../constants';
 import { ObservationalMemory } from '../observational-memory';
 import { ObservationalMemoryProcessor } from '../processor';
 import type { MemoryContextProvider } from '../processor';
-import { normalizeProviderUsage, readLastModelUsage } from '../provider-usage';
+import { normalizeProviderUsage, readLastModelUsage, stampLastModelUsage } from '../provider-usage';
 
 const noopMemoryProvider: MemoryContextProvider = {
   getContext: async () => ({
@@ -112,6 +112,34 @@ function createRequestContext(threadId: string, resourceId: string): RequestCont
 
 function lastModelUsage(message: MastraDBMessage | undefined) {
   return (message?.content.metadata as { mastra?: { lastModelUsage?: unknown } } | undefined)?.mastra?.lastModelUsage;
+}
+
+function createStampedAssistant(opts: {
+  id: string;
+  inputTokens: number;
+  outputTokens: number;
+  createdAt?: Date;
+}): MastraDBMessage {
+  const message = createTestMessage('prior assistant', 'assistant', opts.id);
+  if (opts.createdAt) {
+    message.createdAt = opts.createdAt;
+  }
+  stampLastModelUsage(message, { inputTokens: opts.inputTokens, outputTokens: opts.outputTokens });
+  return message;
+}
+
+function rememberedProvider(messages: MastraDBMessage[]): MemoryContextProvider {
+  return {
+    getContext: async () => ({
+      systemMessage: undefined,
+      messages,
+      hasObservations: false,
+      omRecord: null,
+      continuationMessage: undefined,
+      otherThreadsContext: undefined,
+    }),
+    persistMessages: async () => {},
+  };
 }
 
 describe('provider context tokens', () => {
@@ -443,5 +471,115 @@ describe('provider context tokens', () => {
 
     const lastAssistant = messageList.get.response.db().findLast(m => m.role === 'assistant');
     expect(lastModelUsage(lastAssistant)).toBeUndefined();
+  });
+
+  it('preserves existing content.metadata keys and other mastra keys when stamping', () => {
+    const message = createTestMessage('hi', 'assistant', 'asst-meta');
+    message.content.metadata = { source: 'ibox', mastra: { sealed: true } };
+    stampLastModelUsage(message, { inputTokens: 8, outputTokens: 3 });
+    expect(message.content.metadata).toEqual({
+      source: 'ibox',
+      mastra: { sealed: true, lastModelUsage: { inputTokens: 8, outputTokens: 3 } },
+    });
+  });
+
+  describe('step-0 remembered stamp', () => {
+    it('sets turn.providerUsage from the last remembered assistant stamp', async () => {
+      const stamped = createStampedAssistant({ id: 'asst-latest', inputTokens: 80, outputTokens: 30 });
+      const step0Processor = new ObservationalMemoryProcessor(om, rememberedProvider([stamped]));
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+
+      await step0Processor.processInputStep(buildInputStepArgs(messageList, state, 0));
+
+      const turn = state.__omTurn as { providerUsage?: unknown; providerUsageStale?: boolean };
+      expect(turn.providerUsage).toEqual({ inputTokens: 80, outputTokens: 30 });
+      expect(turn.providerUsageStale).toBe(false);
+    });
+
+    it('does not fall back to an older stamped assistant when the last has no stamp', async () => {
+      const older = createStampedAssistant({ id: 'asst-old', inputTokens: 80, outputTokens: 30 });
+      const latest = createTestMessage('latest unstamped', 'assistant', 'asst-new');
+      const step0Processor = new ObservationalMemoryProcessor(om, rememberedProvider([older, latest]));
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+
+      await step0Processor.processInputStep(buildInputStepArgs(messageList, state, 0));
+
+      const turn = state.__omTurn as { providerUsage?: unknown };
+      expect(turn.providerUsage).toBeUndefined();
+    });
+
+    it('treats a stamp as missing when assistant createdAt is at or before lastObservedAt', async () => {
+      const createdAt = new Date('2026-01-01T00:00:00.000Z');
+      const lastObservedAt = new Date('2026-01-01T00:00:00.000Z');
+      const stamped = createStampedAssistant({
+        id: 'asst-stale-cursor',
+        inputTokens: 80,
+        outputTokens: 30,
+        createdAt,
+      });
+      const orig = om.getOrCreateRecord.bind(om);
+      vi.spyOn(om, 'getOrCreateRecord').mockImplementation(async (tid, rid) => {
+        const rec = await orig(tid, rid);
+        rec.lastObservedAt = lastObservedAt;
+        return rec;
+      });
+      const step0Processor = new ObservationalMemoryProcessor(om, rememberedProvider([stamped]));
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+
+      await step0Processor.processInputStep(buildInputStepArgs(messageList, state, 0));
+
+      const turn = state.__omTurn as { providerUsage?: unknown };
+      expect(turn.providerUsage).toBeUndefined();
+    });
+  });
+
+  describe('usage snapshot gating', () => {
+    it('does not install a snapshot when providerContextTokens is unset', async () => {
+      const unsetOm = new ObservationalMemory({
+        storage,
+        scope: 'thread',
+        observation: {
+          model: createMockObserverModel(),
+          messageTokens: 500,
+          bufferTokens: false,
+        },
+        reflection: {
+          model: createMockObserverModel(),
+          observationTokens: 50000,
+        },
+      });
+      const unsetProcessor = new ObservationalMemoryProcessor(unsetOm, noopMemoryProvider);
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+      messageList.add(createTestMessage('Hello there', 'user', 'msg-user-unset'), 'input');
+
+      await unsetProcessor.processInputStep(buildInputStepArgs(messageList, state, 0));
+      await unsetProcessor.processInputStep(
+        buildInputStepArgs(messageList, state, 1, [{ usage: { inputTokens: 50, outputTokens: 20 } }]),
+      );
+
+      const turn = state.__omTurn as { providerUsage?: unknown; providerUsageStale?: boolean };
+      expect(turn.providerUsage).toBeUndefined();
+    });
+
+    it('does not clear providerUsageStale when later usage is invalid', async () => {
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+      messageList.add(createTestMessage('Hello there', 'user', 'msg-user-stale'), 'input');
+
+      await processor.processInputStep(buildInputStepArgs(messageList, state, 0));
+      const turn = state.__omTurn as { providerUsage?: unknown; providerUsageStale: boolean };
+      turn.providerUsageStale = true;
+
+      await processor.processInputStep(
+        buildInputStepArgs(messageList, state, 1, [{ usage: { inputTokens: Number.NaN, outputTokens: 20 } }]),
+      );
+
+      expect(turn.providerUsageStale).toBe(true);
+      expect(turn.providerUsage).toBeUndefined();
+    });
   });
 });
