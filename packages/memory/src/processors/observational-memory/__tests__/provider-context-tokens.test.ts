@@ -582,4 +582,79 @@ describe('provider context tokens', () => {
       expect(turn.providerUsage).toBeUndefined();
     });
   });
+
+  describe('stale snapshot after observe or activation', () => {
+    function createCaptureOm(observation: { messageTokens: number; bufferTokens?: number | false }) {
+      return new ObservationalMemory({
+        storage,
+        scope: 'thread',
+        observation: {
+          model: createMockObserverModel(),
+          bufferTokens: false,
+          providerContextTokens: 128000,
+          ...observation,
+        },
+        reflection: {
+          model: createMockObserverModel(),
+          observationTokens: 50000,
+        },
+      });
+    }
+
+    it('clears providerUsage and marks stale after a successful observe', async () => {
+      const observeOm = createCaptureOm({ messageTokens: 1 });
+      vi.spyOn(observeOm.observer, 'call').mockResolvedValue({
+        observations: '* User discussed topic X\n* Assistant explained Y',
+        usage: { inputTokens: 100, outputTokens: 50, totalTokens: 150 },
+      });
+      const stamped = createStampedAssistant({ id: 'asst-pre-observe', inputTokens: 80, outputTokens: 30 });
+      const observeProcessor = new ObservationalMemoryProcessor(observeOm, rememberedProvider([stamped]));
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+      messageList.add(createTestMessage('please summarise this. '.repeat(40), 'user', 'msg-user-obs'), 'input');
+
+      await observeProcessor.processInputStep(buildInputStepArgs(messageList, state, 0));
+
+      expect(observeOm.observer.call).toHaveBeenCalled();
+      const turn = state.__omTurn as { providerUsage?: unknown; providerUsageStale?: boolean };
+      expect(turn.providerUsage).toBeUndefined();
+      expect(turn.providerUsageStale).toBe(true);
+
+      messageList.add(createTestMessage('later actor reply', 'assistant', 'msg-asst-later'), 'response');
+      expect(observeProcessor.processOutputStep).toEqual(expect.any(Function));
+      await observeProcessor.processOutputStep!(
+        buildOutputStepArgs(messageList, state, { inputTokens: 11, outputTokens: 7 }) as any,
+      );
+      await observeProcessor.processInputStep(
+        buildInputStepArgs(messageList, state, 1, [{ usage: { inputTokens: 11, outputTokens: 7 } }]),
+      );
+
+      expect(turn.providerUsage).toEqual({ inputTokens: 11, outputTokens: 7 });
+      expect(turn.providerUsageStale).toBe(false);
+    });
+
+    it('clears providerUsage and marks stale after step-0 activation', async () => {
+      const activateOm = createCaptureOm({ messageTokens: 500 });
+      vi.spyOn(activateOm.observer, 'call').mockResolvedValue({
+        observations: '* User discussed topic X\n* Assistant explained Y',
+        usage: { inputTokens: 100, outputTokens: 50, totalTokens: 150 },
+      });
+      const origActivate = activateOm.activate.bind(activateOm);
+      vi.spyOn(activateOm, 'activate').mockImplementation(async opts => {
+        const result = await origActivate(opts);
+        return { ...result, activated: true, activatedMessageIds: result.activatedMessageIds ?? [] };
+      });
+      const stamped = createStampedAssistant({ id: 'asst-pre-activate', inputTokens: 80, outputTokens: 30 });
+      const activateProcessor = new ObservationalMemoryProcessor(activateOm, rememberedProvider([stamped]));
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+
+      await activateProcessor.processInputStep(buildInputStepArgs(messageList, state, 0));
+
+      expect(activateOm.activate).toHaveBeenCalled();
+      const turn = state.__omTurn as { providerUsage?: unknown; providerUsageStale?: boolean };
+      expect(turn.providerUsage).toBeUndefined();
+      expect(turn.providerUsageStale).toBe(true);
+    });
+  });
 });
