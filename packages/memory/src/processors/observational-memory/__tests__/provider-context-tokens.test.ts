@@ -1627,6 +1627,13 @@ describe('provider context tokens', () => {
       const record = await triggerOm.getOrCreateRecord(threadId, resourceId);
       vi.spyOn(triggerOm, 'buffer').mockResolvedValue({ buffered: false, record });
       await storage.saveMessages({ messages: bandMessages.map(message => ({ ...message, threadId, resourceId })) });
+      const activateSpy = vi.spyOn(triggerOm, 'activate');
+      const triggerProcessor = new ObservationalMemoryProcessor(triggerOm, rememberedProvider(bandMessages));
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 0, []));
+      activateSpy.mockClear();
       await storage.updateBufferedObservations({
         id: record.id,
         chunk: {
@@ -1649,12 +1656,6 @@ describe('provider context tokens', () => {
           lastObservedAt: chunkB.at(-1)!.createdAt,
         },
       });
-      const activateSpy = vi.spyOn(triggerOm, 'activate');
-      const triggerProcessor = new ObservationalMemoryProcessor(triggerOm, rememberedProvider(bandMessages));
-      const state: Record<string, unknown> = {};
-      const messageList = new MessageList({ threadId, resourceId });
-
-      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 0, []));
       await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 1, [{ usage: overCapUsage }]));
 
       expect(activateSpy).toHaveBeenCalledTimes(1);

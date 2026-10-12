@@ -548,7 +548,11 @@ export class ObservationStep {
     let pendingMessages = observableMessages;
     const activatedMessageIds: string[] = [];
     let activated = false;
-    while ((status.shouldObserve || providerTriggered) && status.canActivate) {
+    // Provider occupancy may enter this loop when shouldObserve is false, but only
+    // for one activation. It must not keep draining remaining chunks after that.
+    let providerCanActivate = !!providerTriggered;
+    while ((status.shouldObserve || providerCanActivate) && status.canActivate) {
+      providerCanActivate = false;
       const activation = await om.activate({
         threadId,
         resourceId,
