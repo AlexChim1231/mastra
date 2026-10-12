@@ -1409,6 +1409,64 @@ describe('provider context tokens', () => {
       expect(triggerOm.observer.call).not.toHaveBeenCalled();
     });
 
+    it('does not observe on step 1 when leftover step-0 input would cross the cap if recounted', async () => {
+      const triggerOm = createOccupancyOm({ providerContextTokens: providerCap });
+      mockObserverCall(triggerOm);
+      const triggerProcessor = new ObservationalMemoryProcessor(triggerOm, noopMemoryProvider);
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+      const leftover = createTestMessage(
+        'fresh user text that must exceed remaining slack. '.repeat(8),
+        'user',
+        'leftover-step0-input',
+      );
+      const leftoverTokens = triggerOm.getTokenCounter().countMessage(leftover);
+      expect(leftoverTokens).toBeGreaterThan(0);
+      const usage = { inputTokens: providerCap - leftoverTokens + 1, outputTokens: 0 };
+      expect(usage.inputTokens + usage.outputTokens).toBeLessThan(providerCap);
+      expect(usage.inputTokens + usage.outputTokens + leftoverTokens).toBeGreaterThanOrEqual(providerCap);
+
+      messageList.add(leftover, 'input');
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 0, []));
+      expect(triggerOm.observer.call).not.toHaveBeenCalled();
+
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 1, [{ usage }]));
+
+      expect(triggerOm.observer.call).not.toHaveBeenCalled();
+    });
+
+    it('observes on step 1 when new mid-loop input crosses the cap', async () => {
+      const triggerOm = createOccupancyOm({ providerContextTokens: providerCap });
+      mockObserverCall(triggerOm);
+      const triggerProcessor = new ObservationalMemoryProcessor(triggerOm, noopMemoryProvider);
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+      const leftover = createTestMessage('step-0 leftover prompt', 'user', 'leftover-kept-small');
+      const leftoverTokens = triggerOm.getTokenCounter().countMessage(leftover);
+      expect(leftoverTokens).toBeGreaterThan(0);
+      messageList.add(leftover, 'input');
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 0, []));
+      expect(triggerOm.observer.call).not.toHaveBeenCalled();
+
+      const slack = leftoverTokens + 8;
+      const usage = { inputTokens: providerCap - slack, outputTokens: 0 };
+      expect(usage.inputTokens + usage.outputTokens).toBeLessThan(providerCap);
+      expect(usage.inputTokens + usage.outputTokens + leftoverTokens).toBeLessThan(providerCap);
+
+      const newInput = createTestMessage(
+        'genuinely new mid-loop user text that must exceed remaining slack. '.repeat(8),
+        'user',
+        'new-mid-loop-input',
+      );
+      const newTokens = triggerOm.getTokenCounter().countMessage(newInput);
+      expect(newTokens).toBeGreaterThan(slack);
+      messageList.add(newInput, 'input');
+
+      await triggerProcessor.processInputStep(buildInputStepArgs(messageList, state, 1, [{ usage }]));
+
+      expect(triggerOm.observer.call).toHaveBeenCalled();
+    });
+
     it('does not observe overhead-only occupancy when the unobserved window is empty at floor 0', async () => {
       const triggerOm = createOccupancyOm({ providerContextTokens: providerCap });
       mockObserverCall(triggerOm);
