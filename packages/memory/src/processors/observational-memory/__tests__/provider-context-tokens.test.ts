@@ -394,4 +394,54 @@ describe('provider context tokens', () => {
       expect(source).toMatch(/providerContextTokens:\s*omConfig\.observation\.providerContextTokens/);
     });
   });
+
+  describe('unset providerContextTokens', () => {
+    let unsetProcessor: ObservationalMemoryProcessor;
+
+    beforeEach(() => {
+      const unsetOm = new ObservationalMemory({
+        storage,
+        scope: 'thread',
+        observation: {
+          model: createMockObserverModel(),
+          messageTokens: 500,
+          bufferTokens: false,
+        },
+        reflection: {
+          model: createMockObserverModel(),
+          observationTokens: 50000,
+        },
+      });
+      unsetProcessor = new ObservationalMemoryProcessor(unsetOm, noopMemoryProvider);
+    });
+
+    it('does not expose processOutputStep on the processor instance', () => {
+      expect('processOutputStep' in unsetProcessor).toBe(false);
+    });
+
+    it('processInputStep still returns the same messageList', async () => {
+      const state: Record<string, unknown> = {};
+      const messageList = new MessageList({ threadId, resourceId });
+      messageList.add(createTestMessage('Hello there', 'user', 'msg-user'), 'input');
+      const returned = await unsetProcessor.processInputStep(buildInputStepArgs(messageList, state, 0));
+      expect(returned).toBe(messageList);
+    });
+  });
+
+  it('does not stamp lastModelUsage when usage counts are missing', async () => {
+    const state: Record<string, unknown> = {};
+    const messageList = new MessageList({ threadId, resourceId });
+    messageList.add(createTestMessage('Hello there', 'user', 'msg-user'), 'input');
+    await processor.processInputStep(buildInputStepArgs(messageList, state, 0));
+    messageList.add(createTestMessage('Hi', 'assistant', 'msg-assistant'), 'response');
+
+    expect(processor.processOutputStep).toEqual(expect.any(Function));
+    const returned = await processor.processOutputStep!(
+      buildOutputStepArgs(messageList, state, { outputTokens: 20 }) as any,
+    );
+    expect(returned).toBe(messageList);
+
+    const lastAssistant = messageList.get.response.db().findLast(m => m.role === 'assistant');
+    expect(lastModelUsage(lastAssistant)).toBeUndefined();
+  });
 });
