@@ -9,6 +9,8 @@ import {
   resolveRetentionFloor,
   resolveActivationRatio,
   calculateProjectedMessageRemoval,
+  estimateNextRequestTokens,
+  providerTriggerAllowed,
 } from '../thresholds';
 
 function makeChunk(messageTokens: number): BufferedObservationChunk {
@@ -131,6 +133,43 @@ describe('thresholds', () => {
     it('rounds the result', () => {
       // 1.3 * 33333 = 43332.9
       expect(resolveBlockAfter(1.3, 33333)).toBe(43333);
+    });
+  });
+
+  describe('estimateNextRequestTokens', () => {
+    it('sums last input, last output, and added tokens', () => {
+      expect(estimateNextRequestTokens(50, 20, 10)).toBe(80);
+    });
+
+    it('sums zero occupancy to zero', () => {
+      expect(estimateNextRequestTokens(0, 0, 0)).toBe(0);
+    });
+
+    it('sums large last-step usage with a small added-since tail', () => {
+      expect(estimateNextRequestTokens(80000, 200, 5)).toBe(80205);
+    });
+  });
+
+  describe('providerTriggerAllowed', () => {
+    it('allows unobserved local tokens above the retention floor', () => {
+      expect(resolveRetentionFloor(0.7, 30000)).toBeCloseTo(9000, 0);
+      expect(providerTriggerAllowed(10001, 0.7, 30000)).toBe(true);
+    });
+
+    it('refuses unobserved local tokens equal to the retention floor', () => {
+      expect(providerTriggerAllowed(9000, 0.7, 30000)).toBe(false);
+    });
+
+    it('refuses zero unobserved local tokens at a positive floor', () => {
+      expect(providerTriggerAllowed(0, 0.7, 30000)).toBe(false);
+    });
+
+    it('refuses zero unobserved local tokens when async buffering is off', () => {
+      expect(providerTriggerAllowed(0, undefined, 30000)).toBe(false);
+    });
+
+    it('allows a single unobserved local token when the floor is zero', () => {
+      expect(providerTriggerAllowed(1, undefined, 30000)).toBe(true);
     });
   });
 

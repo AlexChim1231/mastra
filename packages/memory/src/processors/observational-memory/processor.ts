@@ -7,6 +7,7 @@ import type {
   Processor,
   ProcessInputStepArgs,
   ProcessOutputResultArgs,
+  ProcessOutputStepArgs,
   ProcessorSpanPhase,
 } from '@mastra/core/processors';
 import type { ObservationalMemoryRecord } from '@mastra/core/storage';
@@ -17,6 +18,12 @@ import { omDebug } from './debug';
 import type { ObservationTurn } from './observation-turn/index';
 import { loadMemoryContextMessages } from './observation-turn/load-memory-context';
 import type { ObservationalMemory } from './observational-memory';
+import {
+  isProviderUsageStampStale,
+  normalizeProviderUsage,
+  readLastModelUsage,
+  stampLastModelUsage,
+} from './provider-usage';
 import { isOmReproCaptureEnabled, safeCaptureJson, writeProcessInputStepReproCapture } from './repro-capture';
 import { insertTemporalGapMarkers } from './temporal-markers';
 import type { TokenCounterModelContext } from './token-counter';
@@ -161,10 +168,47 @@ export class ObservationalMemoryProcessor implements Processor<'observational-me
   /** Active turn — created on first processInputStep, ended on processOutputResult. */
   private turn?: ObservationTurn;
 
+  /** True when `providerContextTokens` is a finite number greater than 0. */
+  private readonly captureProviderUsage: boolean;
+
+  /**
+   * Assigned per instance when `providerContextTokens` is a finite number greater than 0.
+   * Left undeclared on the prototype so `'processOutputStep' in processor` stays false when unset.
+   */
+  declare processOutputStep?: Processor<'observational-memory'>['processOutputStep'];
+
   constructor(engine: ObservationalMemory, memory: MemoryContextProvider, options?: { temporalMarkers?: boolean }) {
     this.engine = engine;
     this.memory = memory;
     this.temporalMarkers = options?.temporalMarkers ?? false;
+    const providerContextTokens = engine.getObservationConfig().providerContextTokens;
+    this.captureProviderUsage =
+      typeof providerContextTokens === 'number' && Number.isFinite(providerContextTokens) && providerContextTokens > 0;
+    if (this.captureProviderUsage) {
+      this.processOutputStep = this.stampLastModelUsageOnOutputStep.bind(this);
+    }
+  }
+
+  private stampLastModelUsageOnOutputStep(args: ProcessOutputStepArgs): MessageList {
+    const { messageList, requestContext, usage } = args;
+    const state = args.state ?? ({} as Record<string, unknown>);
+
+    const context = this.engine.getThreadContext(requestContext, messageList);
+    if (!context) return messageList;
+    if (state[GATEWAY_STATE_KEY]) return messageList;
+
+    const memoryContext = parseMemoryRequestContext(requestContext);
+    if (memoryContext?.memoryConfig?.readOnly) return messageList;
+
+    const normalized = normalizeProviderUsage(usage);
+    if (normalized) {
+      const lastAssistant = messageList.get.response.db().findLast(message => message.role === 'assistant');
+      if (lastAssistant) {
+        stampLastModelUsage(lastAssistant, normalized);
+      }
+    }
+
+    return messageList;
   }
 
   // ─── Processor lifecycle hooks ──────────────────────────────────────────
@@ -174,6 +218,7 @@ export class ObservationalMemoryProcessor implements Processor<'observational-me
       messageList,
       requestContext,
       stepNumber,
+      steps,
       state: _state,
       writer,
       model,
@@ -327,6 +372,30 @@ export class ObservationalMemoryProcessor implements Processor<'observational-me
       this.turn.observabilityContext = observabilityContext;
       this.turn.actorModelContext = actorModelContext;
       this.turn.responseMessageId = messageId;
+      this.turn.captureProviderUsage = this.captureProviderUsage;
+
+      if (this.captureProviderUsage && this.turn) {
+        if (stepNumber === 0) {
+          const lastAssistant = messageList.get.remembered.db().findLast(message => message.role === 'assistant');
+          const stamp = readLastModelUsage(lastAssistant);
+          const unobserved = lastAssistant ? this.engine.getUnobservedMessages([lastAssistant], this.turn.record) : [];
+          if (
+            stamp &&
+            lastAssistant &&
+            !isProviderUsageStampStale(lastAssistant, this.turn.record.lastObservedAt) &&
+            unobserved.some(message => message.id === lastAssistant.id)
+          ) {
+            this.turn.providerUsage = stamp;
+            this.turn.providerUsageStale = false;
+          }
+        } else {
+          const usage = normalizeProviderUsage(steps.at(-1)?.usage);
+          this.turn.providerUsage = usage;
+          if (usage) {
+            this.turn.providerUsageStale = false;
+          }
+        }
+      }
 
       // ── Run step preparation (activation, threshold, observation, filtering) ──
       {

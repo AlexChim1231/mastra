@@ -212,6 +212,13 @@ OM performs thresholding with fast local token estimation. Text uses `tokenx`, a
             defaultValue: '30000',
           },
           {
+            name: 'providerContextTokens',
+            type: 'number',
+            description:
+              "Opt-in provider context cap. Before each model call, OM estimates the next request as the last step's `inputTokens` plus `outputTokens` plus a local estimate of messages added since, and observes when the estimate reaches this value. The `messageTokens` check still runs, so either can trigger observation. Missing usage falls back to the local `messageTokens` check. Occupancy triggers only when unobserved local tokens are above the retention floor (and above 0 when the floor is 0). OM stamps last-step usage at `content.metadata.mastra.lastModelUsage` for the next turn and doesn't add `cachedInputTokens` on top of `inputTokens`. Omit to keep current behaviour.",
+            isOptional: true,
+          },
+          {
             name: 'maxTokensPerBatch',
             type: 'number',
             description:

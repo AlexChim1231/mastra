@@ -1232,6 +1232,7 @@ https://mastra.ai/en/docs/memory/overview`,
       const obs = om.observation;
       result.observation = {
         messageTokens: obs.messageTokens,
+        providerContextTokens: obs.providerContextTokens,
         modelSettings: obs.modelSettings as Record<string, unknown>,
         providerOptions: obs.providerOptions,
         maxTokensPerBatch: obs.maxTokensPerBatch,

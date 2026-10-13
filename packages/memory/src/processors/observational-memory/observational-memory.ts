@@ -771,6 +771,7 @@ export class ObservationalMemory {
         continuationHints: config.observation?.continuationHints,
       }),
     };
+    this.observationConfig.providerContextTokens = config.observation?.providerContextTokens;
 
     // Resolve reflection config with defaults
     this.reflectionConfig = {
@@ -1268,6 +1269,13 @@ export class ObservationalMemory {
         throw new Error(
           `observation.bufferTokens (${this.observationConfig.bufferTokens}) must be less than messageTokens (${observationThreshold})`,
         );
+      }
+    }
+
+    const providerContextTokens = this.observationConfig.providerContextTokens;
+    if (providerContextTokens !== undefined) {
+      if (!Number.isFinite(providerContextTokens) || providerContextTokens <= 0) {
+        throw new Error(`observation.providerContextTokens must be a finite number > 0, got ${providerContextTokens}`);
       }
     }
 
@@ -4173,6 +4181,8 @@ ${formattedMessages}
     hooks?: ObserveLifecycleHooks;
     /** Which pipeline path initiated this cycle; defaults to 'manual'. */
     trigger?: ObserveTrigger;
+    /** @internal Set only from runThresholdObservation when the provider occupancy trigger fired. */
+    skipMessageTokensGate?: boolean;
     agent?: ProcessorContext['agent'];
     sendSignal?: ProcessorContext['sendSignal'];
     sendStateSignal?: ProcessorContext['sendStateSignal'];
@@ -4216,6 +4226,7 @@ ${formattedMessages}
             );
 
         if (
+          !opts.skipMessageTokensGate &&
           !this.meetsObservationThreshold({
             record: freshRecord,
             unobservedTokens: await this.tokenCounter.countMessagesAsync(unobservedMessages),

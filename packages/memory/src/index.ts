@@ -2378,6 +2378,7 @@ ${workingMemory}`;
         ? {
             model: omConfig.observation.model,
             messageTokens: omConfig.observation.messageTokens,
+            providerContextTokens: omConfig.observation.providerContextTokens,
             modelSettings: omConfig.observation.modelSettings,
             maxTokensPerBatch: omConfig.observation.maxTokensPerBatch,
             providerOptions: omConfig.observation.providerOptions,

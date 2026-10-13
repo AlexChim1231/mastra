@@ -278,7 +278,7 @@ OM solves both problems by compressing old context into dense observations.
 
 When message history tokens exceed a threshold (default: 30,000), the Observer creates observations which are concise notes about what happened:
 
-OM uses fast local token estimation for this thresholding work. Text is estimated with `tokenx`, while image parts use provider-aware heuristics so multimodal conversations still trigger observation at the right time. The same applies to image-like `file` parts when a transport normalizes an uploaded image as a file instead of an image part. For example, OpenAI image detail settings can materially change when OM decides to observe.
+OM uses fast local token estimation for this thresholding work. Text is estimated with `tokenx`, while image parts use provider-aware heuristics so multimodal conversations still trigger observation at the right time. The same applies to image-like `file` parts when a transport normalizes an uploaded image as a file instead of an image part. For example, OpenAI image detail settings can materially change when OM decides to observe. To also observe based on provider-reported usage, see [provider context occupancy](#provider-context-occupancy).
 
 The Observer can also see attachments in the history it reviews. For readability, OM keeps placeholders such as `[Image #1: reference-board.png]` or `[File #1: floorplan.pdf]` in the transcript while forwarding the actual attachments beside the text. When possible, image-like `file` parts become image inputs for the Observer. Other attachments remain file parts and use normalized token counting. This applies to both normal thread observation and batched resource-scope observation.
 
@@ -753,6 +753,8 @@ const memory = new Memory({
       observation: {
         // when to run the Observer (default: 30,000)
         messageTokens: 30_000,
+        // opt-in: also observe before the provider context fills (default: unset)
+        providerContextTokens: 100_000,
       },
       reflection: {
         // when to run the Reflector (default: 40,000)
@@ -765,6 +767,20 @@ const memory = new Memory({
   },
 })
 ```
+
+### Provider context occupancy
+
+The local estimate can undercount what the provider actually receives, for example with attachments, large tool results, or provider-side system and tool overhead. Set `providerContextTokens` to also observe based on the usage the model reports. Omit it to keep current behaviour.
+
+Before each model call, OM estimates the next request as the last step's `inputTokens` plus `outputTokens` plus a local estimate of messages added since. OM observes when that estimate reaches `providerContextTokens`. The `messageTokens` check still runs, so either check can trigger observation.
+
+- If the model reports no usage, OM falls back to the local `messageTokens` check.
+- Occupancy triggers only when unobserved local tokens are above the retention floor (and above 0 when the floor is 0). Fixed system or tool overhead alone can't cause repeated observation.
+- OM stamps last-step usage on the last assistant message at `content.metadata.mastra.lastModelUsage`, so the next turn can read it. No storage schema change is needed.
+- OM uses `inputTokens` as reported and doesn't add `cachedInputTokens` on top.
+- A new attachment is counted locally until the provider reports usage for it, so the first request that carries a large file isn't protected. Leave headroom in `providerContextTokens`, or supply [caller token estimates for file parts](#caller-supplied-token-estimates-for-file-parts).
+
+Choose a value below the model's context window that leaves room for the next response and tool output, and stays above your fixed system and tool overhead. For a 128k window, `100_000` is a reasonable starting point.
 
 ### Token counting cache
 

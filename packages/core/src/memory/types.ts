@@ -508,6 +508,14 @@ export interface ObservationalMemoryObservationConfig {
   messageTokens?: number;
 
   /**
+   * Provider context window in tokens.
+   * When set to a finite number greater than 0, Observational Memory records
+   * last-step provider usage so later steps and later turns can read it.
+   * Omitting this field keeps current behaviour.
+   */
+  providerContextTokens?: number;
+
+  /**
    * Model settings for the Observer agent.
    * @default { temperature: 0.3, maxOutputTokens: 100_000 }
    */
@@ -1493,6 +1501,8 @@ export type SerializedObservationalMemoryObservationConfig = {
 
   /** Token count threshold that triggers observation */
   messageTokens?: number;
+  /** Provider context window in tokens. Unset keeps current behaviour. */
+  providerContextTokens?: number;
   /** Model settings (temperature, maxOutputTokens, etc.) */
   modelSettings?: Record<string, unknown>;
   /** Provider-specific options */
