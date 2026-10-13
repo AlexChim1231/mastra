@@ -778,6 +778,7 @@ Before each model call, OM estimates the next request as the last step's `inputT
 - Occupancy triggers only when unobserved local tokens are above the retention floor (and above 0 when the floor is 0). Fixed system or tool overhead alone can't cause repeated observation.
 - OM stamps last-step usage on the last assistant message at `content.metadata.mastra.lastModelUsage`, so the next turn can read it. No storage schema change is needed.
 - OM uses `inputTokens` as reported and doesn't add `cachedInputTokens` on top.
+- A new attachment is counted locally until the provider reports usage for it, so the first request that carries a large file isn't protected. Leave headroom in `providerContextTokens`, or supply [caller token estimates for file parts](#caller-supplied-token-estimates-for-file-parts).
 
 Choose a value below the model's context window that leaves room for the next response and tool output, and stays above your fixed system and tool overhead. For a 128k window, `100_000` is a reasonable starting point.
 
